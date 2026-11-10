@@ -18,7 +18,9 @@ task uninstall          # remove the package
 ```
 
 `task install` builds from `misc/dist/arch/PKGBUILD`, which clones the checkout's
-HEAD, so uncommitted changes don't make it in. It builds with makepkg's flags,
+HEAD, so uncommitted changes don't make it in. Nothing rebuilds it automatically
+(the dotfiles' install.sh doesn't know about it), so run it after pulling new
+commits. It builds with makepkg's flags,
 `-march` swapped for x86-64-v3, and `optimize=speed` (-O3). Its scons cache in
 `misc/dist/arch/.scons-cache` keeps rebuilds quick.
 
