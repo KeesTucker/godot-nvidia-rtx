@@ -75,6 +75,11 @@ if env["builtin_embree"]:
     if env.msvc:  # Disable bogus warning about intentional struct padding.
         env_raycast.Append(CCFLAGS=["/wd4324"])
 
+    # Only Embree's SSE kernels are built, but with AVX on (say -march=x86-64-v3)
+    # its headers reference the AVX2 ones and the link fails.
+    if env["arch"] == "x86_64" and not env.msvc:
+        env_raycast.Append(CCFLAGS=["-mno-avx"])
+
     env_thirdparty = env_raycast.Clone()
     env_thirdparty.force_optimization_on_debug()
     env_thirdparty.disable_warnings()
