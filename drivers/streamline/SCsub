@@ -13,6 +13,9 @@ driver_obj = []
 if env["use_streamline"]:
     env_streamline.Prepend(CPPPATH=[thirdparty_streamline_dir + "/include"])
 
+if "STREAMLINE_NGX" in env["CPPDEFINES"]:
+    env_streamline.Prepend(CPPPATH=["#thirdparty/ngx/include"])
+
 if env["vulkan"]:
     env_streamline.Prepend(CPPPATH=[thirdparty_vulkan_dir, thirdparty_vulkan_dir + "/include"])
     env_streamline.Prepend(CPPDEFINES=["STREAMLINE_ENABLED_VULKAN=1"])

@@ -281,6 +281,7 @@ thirdparty/swappy-frame-pacing/x86_64/abi.json
 
 thirdparty/perfetto/
 thirdparty/aftermath/
+thirdparty/ngx/
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/

@@ -64,6 +64,10 @@
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 
+#ifdef STREAMLINE_NGX
+#include "drivers/streamline/streamline_ngx.h"
+#endif
+
 StreamlineContext &StreamlineContext::get() {
 	static StreamlineContext _context;
 	return _context;
@@ -101,6 +105,8 @@ void StreamlineContext::load_functions(bool d3d12) {
 		this->func_DXGIGetDebugInterface1 = (void *)GetProcAddress(streamline, "DXGIGetDebugInterface1");
 	}
 #endif
+#elif defined(STREAMLINE_NGX)
+	StreamlineNGX::install_streamline_functions(*this);
 #endif
 }
 

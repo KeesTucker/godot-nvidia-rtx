@@ -608,6 +608,17 @@ if env["precision"] == "double":
 if env["use_streamline"]:
     if env["platform"] == "windows":
         env.AppendUnique(CPPDEFINES=["STREAMLINE_ENABLED"])
+    elif env["platform"] == "linuxbsd" and env["arch"] == "x86_64" and env["vulkan"]:
+        # Streamline is Windows-only, so Linux gets DLSS through NGX behind the same
+        # sl* API (drivers/streamline/streamline_ngx.cpp).
+        from misc.utility.ngx_sdk import copy_ngx_runtime_libraries, fetch_ngx_sdk
+
+        if fetch_ngx_sdk():
+            copy_ngx_runtime_libraries()
+            env.AppendUnique(CPPDEFINES=["STREAMLINE_ENABLED", "STREAMLINE_NGX"])
+            env.Append(LIBPATH=["#thirdparty/ngx/lib/Linux_x86_64"], LIBS=["nvsdk_ngx", "dl"])
+        else:
+            env["use_streamline"] = False
     else:
         env["use_streamline"] = False
 
