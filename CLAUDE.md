@@ -2,8 +2,9 @@
 
 Kees's fork of NVIDIA-RTX/godot: Godot with NVIDIA's path tracer and DLSS. The
 default branch is `nvidia-pt-dlss`. `origin` is the fork and `upstream` is
-NVIDIA. Open PRs against the fork with `gh pr create -R KeesTucker/godot-nvidia-rtx`;
-without `-R`, gh targets NVIDIA's repo.
+NVIDIA. Push straight to `nvidia-pt-dlss` on `origin`; no PR needed. If a PR is
+ever wanted, use `gh pr create -R KeesTucker/godot-nvidia-rtx`; without `-R`, gh
+targets NVIDIA's repo.
 
 Fetch one branch at a time: `git fetch --no-tags origin nvidia-pt-dlss`. A bare
 `git fetch` pulls every Godot branch and tag, hundreds of thousands of objects.
