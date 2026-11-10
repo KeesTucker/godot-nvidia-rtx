@@ -36,7 +36,8 @@ depends=(
 makedepends=(git mise python)
 optdepends=('nvidia-utils: DLSS and the path tracer')
 # Godot's full LTO with GCC takes far longer than the build and isn't on in the plain build either.
-options=(!lto !debug)
+# !strip: stripping the DLSS libraries breaks NVIDIA's signature, so NGX refuses them.
+options=(!lto !debug !strip)
 source=(
   "$pkgname::git+file://$_repo#commit=$_commit"
   godot-rtx
