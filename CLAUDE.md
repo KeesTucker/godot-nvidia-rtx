@@ -8,11 +8,14 @@ without `-R`, gh targets NVIDIA's repo.
 ## Building
 
 ```sh
-mise exec -- scons platform=linuxbsd target=editor -j24
+task install            # build the editor, link ~/.local/bin/godot-rtx, write the launcher entry
+task install:templates  # build and install the Linux export templates
 ```
 
+`task build` alone runs `mise exec -- scons platform=linuxbsd target=editor`.
 The editor lands in `bin/godot.linuxbsd.editor.x86_64`. A clean build takes
-about 5 minutes on atalanta.
+about 5 minutes on atalanta. The launcher entry runs the editor on the Wayland
+driver, which is what gives HDR output on Hyprland.
 
 ## Linux DLSS
 
