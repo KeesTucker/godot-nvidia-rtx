@@ -1,0 +1,72 @@
+version: "3"
+
+# Builds this fork and installs it for the current user. scons comes from mise
+# (pipx:scons in ~/.config/mise/config.toml).
+
+vars:
+  JOBS:
+    sh: nproc
+  EDITOR_BINARY: "{{.ROOT_DIR}}/bin/godot.linuxbsd.editor.x86_64"
+  # Godot looks for export templates in a folder named after its version,
+  # e.g. 4.8.dev, or 4.8.1.stable once there's a patch number.
+  TEMPLATE_VERSION:
+    sh: python3 -c "import version as v; print('.'.join(str(p) for p in [v.major, v.minor] + ([v.patch] if v.patch else []) + [v.status]))"
+  TEMPLATE_DIR: "{{.HOME}}/.local/share/godot/export_templates/{{.TEMPLATE_VERSION}}"
+  LAUNCHER_NAME: godot-rtx
+
+tasks:
+  default:
+    desc: Build the editor and install it
+    cmds:
+      - task: install
+
+  build:
+    desc: Build the editor (fetches the DLSS SDK on first run)
+    cmds:
+      - mise exec -- scons platform=linuxbsd target=editor -j{{.JOBS}}
+
+  build:templates:
+    desc: Build the Linux release and debug export templates
+    cmds:
+      - mise exec -- scons platform=linuxbsd target=template_release -j{{.JOBS}}
+      - mise exec -- scons platform=linuxbsd target=template_debug -j{{.JOBS}}
+
+  install:
+    desc: Build the editor, link it as godot-rtx and add the launcher entry
+    deps: [build]
+    cmds:
+      - mkdir -p {{.HOME}}/.local/bin {{.HOME}}/.local/share/applications
+      - ln -sf {{.EDITOR_BINARY}} {{.HOME}}/.local/bin/{{.LAUNCHER_NAME}}
+      # The Wayland driver is what gives HDR output on Hyprland.
+      - |
+        cat > {{.HOME}}/.local/share/applications/godot-nvidia-rtx.desktop <<EOF
+        [Desktop Entry]
+        Type=Application
+        Name=Godot (NVIDIA RTX)
+        GenericName=Game engine
+        Comment=NVIDIA's path tracing Godot fork with Linux DLSS, built from {{.ROOT_DIR}}
+        Keywords=godot;game development;game engine;dlss;hdr;
+        Exec={{.HOME}}/.local/bin/{{.LAUNCHER_NAME}} --display-driver wayland %f
+        Icon={{.ROOT_DIR}}/misc/logo/icon.svg
+        Terminal=false
+        MimeType=application/x-godot-project;
+        Categories=Development;IDE;
+        StartupWMClass=Godot
+        EOF
+
+  install:templates:
+    desc: Build the export templates and install them where the editor finds them
+    deps: ["build:templates"]
+    cmds:
+      - mkdir -p {{.TEMPLATE_DIR}}
+      - cp bin/godot.linuxbsd.template_release.x86_64 {{.TEMPLATE_DIR}}/linux_release.x86_64
+      - cp bin/godot.linuxbsd.template_debug.x86_64 {{.TEMPLATE_DIR}}/linux_debug.x86_64
+      - echo "{{.TEMPLATE_VERSION}}" > {{.TEMPLATE_DIR}}/version.txt
+      # Export doesn't copy these, so a game needs them shipped next to its binary.
+      - 'echo "Remember: ship bin/libnvidia-ngx-dlss*.so.* next to exported games for DLSS."'
+
+  uninstall:
+    desc: Remove the godot-rtx link and the launcher entry
+    cmds:
+      - rm -f {{.HOME}}/.local/bin/{{.LAUNCHER_NAME}}
+      - rm -f {{.HOME}}/.local/share/applications/godot-nvidia-rtx.desktop
