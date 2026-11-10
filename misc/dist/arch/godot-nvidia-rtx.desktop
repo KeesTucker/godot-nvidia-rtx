@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Godot (NVIDIA RTX)
+GenericName=Game engine
+Comment=NVIDIA's path tracing Godot fork with Linux DLSS
+Keywords=godot;game development;game engine;dlss;hdr;
+# The Wayland driver is what gives HDR output on Hyprland.
+Exec=godot-rtx --display-driver wayland %f
+Icon=godot-nvidia-rtx
+Terminal=false
+MimeType=application/x-godot-project;
+Categories=Development;IDE;
+StartupWMClass=Godot

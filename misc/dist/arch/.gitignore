@@ -1,0 +1,5 @@
+/src/
+/pkg/
+/godot-nvidia-rtx/
+/.scons-cache/
+*.pkg.tar.*

@@ -1,0 +1,106 @@
+# Maintainer: Kees Tucker <me@keestucker.com>
+#
+# Local package for this fork: builds the commit checked out in this repo, so
+# commit first. Install with `task install` from the repo root. Never publish
+# the built package: it carries the DLSS runtime, which NVIDIA's license only
+# lets you ship with an application.
+
+_repo=$(git -C "$startdir" rev-parse --show-toplevel)
+_commit=$(git -C "$_repo" rev-parse HEAD)
+_godot_version=$(cd "$_repo" && python -c "import version as v; print('.'.join(str(p) for p in [v.major, v.minor] + ([v.patch] if v.patch else []) + [v.status]))")
+
+pkgname=godot-nvidia-rtx
+# pkgver is worked out here rather than in pkgver(), which would rewrite this file on every build.
+pkgver=$_godot_version.r$(git -C "$_repo" rev-list --count HEAD).g$(git -C "$_repo" rev-parse --short=7 HEAD)
+pkgrel=1
+pkgdesc="Godot with NVIDIA's path tracer and DLSS, with Linux DLSS through NGX"
+arch=(x86_64)
+url="https://github.com/KeesTucker/godot-nvidia-rtx"
+license=(MIT LicenseRef-NVIDIA-DLSS)
+# Godot builds its own copies of most libraries and dlopens the windowing and
+# audio ones, so these are runtime deps, not link deps.
+depends=(
+  alsa-lib
+  dbus
+  fontconfig
+  libdecor
+  libpulse
+  libxcursor
+  libxi
+  libxinerama
+  libxkbcommon
+  libxrandr
+  vulkan-icd-loader
+  wayland
+)
+makedepends=(git mise python)
+optdepends=('nvidia-utils: DLSS and the path tracer')
+# Godot's full LTO with GCC takes far longer than the build and isn't on in the plain build either.
+options=(!lto !debug)
+source=(
+  "$pkgname::git+file://$_repo#commit=$_commit"
+  godot-rtx
+  godot-nvidia-rtx.desktop
+)
+sha256sums=(
+  SKIP
+  da6b6e56a3f033521cc3a539bf48b862a57b60eed46b0c0f35c1debfd036715c
+  12994ae8633ab0ecdbf51ea40bb40a3975459101bbc9be1976b8502fdf68f2c0
+)
+
+# _cachyos_v3_flags swaps makepkg's -march for x86-64-v3, the level CachyOS's v3
+# repos build for. It drops -O so Godot's optimize=speed (-O3) decides, and
+# -fexceptions, which would undo Godot's -fno-exceptions. Falls back to
+# -march=native on a CPU without v3, where a v3 build wouldn't start.
+_cachyos_v3_flags() {
+  local march=-march=native
+  if /usr/lib/ld-linux-x86-64.so.2 --help | grep -q 'x86-64-v3 (supported'; then
+    march=-march=x86-64-v3
+  fi
+  local flag kept=()
+  for flag in $1; do
+    case $flag in
+      -march=* | -mtune=* | -O* | -fexceptions) ;;
+      *) kept+=("$flag") ;;
+    esac
+  done
+  printf '%s' "$march ${kept[*]}"
+}
+
+prepare() {
+  cd "$pkgname"
+  # Reuse the checkout's DLSS SDK. ngx_sdk.py checks every file's hash and
+  # downloads anything missing or wrong.
+  if [ -d "$_repo/thirdparty/ngx" ]; then
+    cp -r "$_repo/thirdparty/ngx" thirdparty/
+  fi
+  # The build quietly drops DLSS if the SDK fetch fails, so fail here instead.
+  python -c 'import sys; from misc.utility.ngx_sdk import fetch_ngx_sdk; sys.exit(0 if fetch_ngx_sdk() else 1)'
+}
+
+build() {
+  cd "$pkgname"
+  # The cache outlives src/, so a rebuild only compiles what the new commit changed.
+  # makepkg's CXXFLAGS is CFLAGS plus C++-only flags; ccflags already covers the CFLAGS part.
+  mise exec -- scons platform=linuxbsd target=editor optimize=speed -j"$(nproc)" \
+    cache_path="$startdir/.scons-cache" cache_limit=10 \
+    ccflags="$(_cachyos_v3_flags "$CFLAGS")" \
+    cxxflags="${CXXFLAGS#"$CFLAGS"}" \
+    linkflags="$LDFLAGS"
+}
+
+package() {
+  cd "$pkgname"
+  # NGX loads the DLSS libraries from the editor binary's own folder.
+  install -Dm755 bin/godot.linuxbsd.editor.x86_64 "$pkgdir/usr/lib/$pkgname/godot"
+  install -Dm644 -t "$pkgdir/usr/lib/$pkgname" bin/libnvidia-ngx-dlss.so.* bin/libnvidia-ngx-dlssd.so.*
+  install -Dm755 "$srcdir/godot-rtx" "$pkgdir/usr/bin/godot-rtx"
+
+  install -Dm644 "$srcdir/godot-nvidia-rtx.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 misc/logo/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+  install -Dm644 misc/dist/linux/org.godotengine.Godot.xml "$pkgdir/usr/share/mime/packages/$pkgname.xml"
+
+  install -Dm644 LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE.txt"
+  install -Dm644 COPYRIGHT.txt "$pkgdir/usr/share/licenses/$pkgname/COPYRIGHT.txt"
+  install -Dm644 thirdparty/ngx/LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/NVIDIA-DLSS-LICENSE.txt"
+}
