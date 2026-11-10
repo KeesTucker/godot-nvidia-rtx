@@ -39,6 +39,9 @@
 
 #include <thirdparty/misc/smolv.h>
 
+#if defined(STREAMLINE_NGX)
+#include "drivers/streamline/streamline_ngx.h"
+#endif
 #if defined(STREAMLINE_ENABLED)
 #include "drivers/streamline/streamline.h"
 #endif
@@ -636,6 +639,14 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	}
 
 	_register_requested_device_extension(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME, false);
+
+#ifdef STREAMLINE_NGX
+	for (const CharString &ngx_extension : StreamlineNGX::get_required_vulkan_device_extensions()) {
+		if (!requested_device_extensions.has(ngx_extension)) {
+			_register_requested_device_extension(ngx_extension, false);
+		}
+	}
+#endif
 
 	uint32_t device_extension_count = 0;
 	VkResult err = vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &device_extension_count, nullptr);
@@ -2019,6 +2030,14 @@ Error RenderingDeviceDriverVulkan::initialize(uint32_t p_device_index, uint32_t 
 	pipeline_statistics.file_access->flush();
 #endif
 
+#if defined(STREAMLINE_NGX)
+	// NGX can only start once the device exists, and must be up before the
+	// marker below fetches the DLSS functions.
+	if (Streamline::get_singleton()) {
+		Streamline::get_singleton()->set_internal_parameter("vulkan_instance", (void *)context_driver->instance_get());
+		Streamline::get_singleton()->set_internal_parameter("vulkan_device", (void *)vk_device);
+	}
+#endif
 #if defined(STREAMLINE_ENABLED)
 	if (Streamline::get_singleton()) {
 		Streamline::get_singleton()->emit_marker(STREAMLINE_MARKER_AFTER_DEVICE_CREATION);

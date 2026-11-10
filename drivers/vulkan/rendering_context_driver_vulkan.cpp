@@ -43,6 +43,10 @@
 #include "drivers/vulkan/rendering_device_driver_vulkan.h"
 #include "drivers/vulkan/vulkan_hooks.h"
 
+#ifdef STREAMLINE_NGX
+#include "drivers/streamline/streamline_ngx.h"
+#endif
+
 #ifndef DEV_ENABLED
 #include "core/os/os.h"
 #endif
@@ -468,6 +472,15 @@ Error RenderingContextDriverVulkan::_initialize_instance_extensions() {
 	if (want_debug_utils) {
 		_register_requested_instance_extension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, false);
 	}
+
+#ifdef STREAMLINE_NGX
+	// On Windows the Streamline interposer adds these behind our back.
+	for (const CharString &ngx_extension : StreamlineNGX::get_required_vulkan_instance_extensions()) {
+		if (!requested_instance_extensions.has(ngx_extension)) {
+			_register_requested_instance_extension(ngx_extension, false);
+		}
+	}
+#endif
 
 	// Load instance extensions that are available.
 	uint32_t instance_extension_count = 0;

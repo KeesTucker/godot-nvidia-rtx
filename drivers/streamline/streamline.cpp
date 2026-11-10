@@ -36,6 +36,9 @@
 #ifdef STREAMLINE_ENABLED
 #include "drivers/streamline/streamline_context.h"
 #endif
+#ifdef STREAMLINE_NGX
+#include "drivers/streamline/streamline_ngx.h"
+#endif
 
 Streamline *Streamline::singleton = nullptr;
 
@@ -268,8 +271,20 @@ void Streamline::set_internal_parameter(const char *key, void *value) {
 #if STREAMLINE_ENABLED_VULKAN
 	if (strcmp(key, "vulkan_physical_device") == 0) {
 		void *phys_device = (void *)value;
+#ifdef STREAMLINE_NGX
+		StreamlineNGX::remember_vulkan_physical_device(phys_device);
+#endif
 		StreamlineContext::get().streamline_capabilities = StreamlineContext::get().enumerate_support_vulkan(phys_device);
 	}
+#ifdef STREAMLINE_NGX
+	if (strcmp(key, "vulkan_instance") == 0) {
+		StreamlineNGX::remember_vulkan_instance(value);
+	}
+	if (strcmp(key, "vulkan_device") == 0 && StreamlineNGX::initialize_for_vulkan_device(value)) {
+		void *phys_device = StreamlineNGX::get_remembered_vulkan_physical_device();
+		StreamlineContext::get().streamline_capabilities = StreamlineContext::get().enumerate_support_vulkan(phys_device);
+	}
+#endif
 #endif
 #if STREAMLINE_ENABLED_D3D12
 	if (strcmp(key, "d3d12_adapter_luid") == 0) {
