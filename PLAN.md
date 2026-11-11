@@ -88,6 +88,18 @@ but thin leaves don't need SSS; this is the right model for them.
 
 Small and self-contained: about 1–2 hours. It fits alongside the water work.
 
+## Bug: source_color defaults skip sRGB conversion
+
+`pack_uniform` in `render_raytracing.cpp` converts a `source_color` uniform
+from sRGB to linear when the material sets it as a Color, but packs the
+shader's default value raw, so the path tracer sees defaults about 9× too
+bright in the darks, unlike the rasterizer. Found 2026-11-12 when
+seagrass-tank moved its blade colours from shader defaults to material
+parameters and the meadow went black. Fix: convert defaults the same way
+(`_def_real` for VEC3/VEC4 with HINT_SOURCE_COLOR). Check seagrass-tank's
+remaining custom shaders after, since any colours tuned on the raw defaults
+will darken.
+
 ## Later
 
 Opacity micromaps, linear swept spheres, cluster/partitioned acceleration
