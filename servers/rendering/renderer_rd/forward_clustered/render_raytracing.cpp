@@ -3286,6 +3286,15 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	if (index_of_refraction > 1.0f) {
 		mat.flags |= RT_MAT_FLAG_DIELECTRIC;
 		mat.surface_params.index_of_refraction = rt_unorm8(index_of_refraction - 1.0f);
+		// The medium behind the surface absorbs per colour (Beer–Lambert):
+		// `uniform vec3 rt_absorption_per_m`.
+		const Variant absorption = material_storage->material_get_param(p_material_rid, "rt_absorption_per_m");
+		if (absorption.get_type() == Variant::VECTOR3) {
+			const Vector3 absorption_per_m = absorption;
+			mat.medium_absorption[0] = absorption_per_m.x;
+			mat.medium_absorption[1] = absorption_per_m.y;
+			mat.medium_absorption[2] = absorption_per_m.z;
+		}
 	}
 
 	// Addressing stored in fp16 slots, packed once below.

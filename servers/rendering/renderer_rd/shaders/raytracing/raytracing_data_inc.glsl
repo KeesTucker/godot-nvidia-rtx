@@ -144,6 +144,8 @@ struct MaterialData {
 	uint metallic_texture; // texture_metallic, or texture_orm for ORMMaterial3D.
 	uint ao_texture; // AO texture when AO is enabled; 0 (white) otherwise.
 	float emission_indirect; // BaseMaterial3D emission_indirect_energy, see MaterialResult::emission_indirect.
+
+	vec4 medium_absorption; // xyz: absorption per metre inside a RT_MAT_FLAG_DIELECTRIC (rt_absorption_per_m), w unused.
 };
 
 // Bindless index of a MaterialData *_texture.

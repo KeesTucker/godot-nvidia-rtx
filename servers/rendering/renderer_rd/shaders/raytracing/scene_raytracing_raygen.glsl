@@ -116,6 +116,7 @@ void dlss_rr_replace_primary_surface(vec3 p_origin, vec3 p_dir, float p_hit_t) {
 	gs.rng_state = 0u;
 	gs.offset_normal = vec3(0.0, 0.0, 1.0);
 	gs.next_ray_dir = vec3(0.0, 0.0, 1.0);
+	gs.medium = 0u;
 	for (uint mirrors = 1u; mirrors <= DLSS_RR_REPLACEMENT_MAX_MIRRORS; mirrors++) {
 		// One bounce and no SAMPLE_ZERO keep the primary depth/velocity/guide writes away.
 		gs.packed_bounces_flags = inc_total_bounce(0u) | GUIDE_RAY_FLAG |
@@ -215,6 +216,7 @@ void main() {
 		ps.hit_t = -1.0;
 		ps.offset_normal = vec3(0.0, 0.0, 1.0);
 		ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
+		ps.medium = 0u; // The camera is in air.
 
 		vec3 ray_origin = origin.xyz;
 		vec3 ray_dir = direction.xyz;

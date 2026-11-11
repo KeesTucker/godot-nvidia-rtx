@@ -642,8 +642,9 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 // exact Fresnel reflectance, otherwise refract; total internal reflection
 // always reflects. Front faces are where the ray enters the denser medium.
 // The choice is made with the Fresnel probability, so the throughput is
-// unchanged. Absorption inside the medium comes later (medium tracking).
-void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, float index_of_refraction, inout PathState ps) {
+// unchanged. Absorption inside the medium is applied per segment in
+// shade_and_bounce().
+void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, float index_of_refraction, uint material_index, inout PathState ps) {
 	float relative_ior = h.is_front_face ? 1.0 / index_of_refraction : index_of_refraction;
 	float cos_incident = clamp(dot(N, V), 0.0, 1.0);
 	float sin_transmitted_squared = relative_ior * relative_ior * (1.0 - cos_incident * cos_incident);
@@ -663,6 +664,9 @@ void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, float index_of_re
 		ps.next_ray_dir = refract(-V, N, relative_ior);
 		// Start the refracted ray on the far side of the surface.
 		ps.offset_normal = -h.geometry_normal;
+		// Through a front face the ray enters this dielectric's medium; through
+		// a back face it leaves it for air.
+		ps.medium = h.is_front_face ? material_index + 1u : 0u;
 	}
 	ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags) & ~LAST_BOUNCE_DIFFUSE_FLAG;
 }
@@ -676,10 +680,11 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 	if (total_bounces >= RT_GET_MAX_BOUNCES() || diffuse_bounces >= MAX_DIFFUSE_BOUNCES) {
 		return false;
 	}
-	MaterialData entry_material = materials[geometries[h.geometry_idx].material_index & RT_MATERIAL_INDEX_MASK];
+	uint entry_material_index = geometries[h.geometry_idx].material_index & RT_MATERIAL_INDEX_MASK;
+	MaterialData entry_material = materials[entry_material_index];
 	bool is_dielectric = (entry_material.flags & RT_MAT_FLAG_DIELECTRIC) != 0u;
 	if (is_dielectric) {
-		sample_dielectric_continuation(h, N, V, rt_material_index_of_refraction(entry_material), ps);
+		sample_dielectric_continuation(h, N, V, rt_material_index_of_refraction(entry_material), entry_material_index, ps);
 		return true;
 	}
 
@@ -808,6 +813,7 @@ void dlss_rr_guide_hit(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV,
 	gs.hit_t = gl_HitTEXT;
 	gs.offset_normal = h.geometry_normal;
 	gs.next_ray_dir = mirror ? reflect(-V, N) : N;
+	gs.medium = 0u;
 	path_pack(payload, gs);
 	vec3 motion = mirror ? vec3(0.0) : rt_hit_prev_world_pos(h.hit_pos) - h.hit_pos;
 	payload.packed_rt[0] = packHalf2x16(motion.xy);
@@ -947,6 +953,12 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 		}
 		path_pack(payload, ps);
 		return;
+	}
+
+	// Beer–Lambert: the segment that ends here ran through the medium the ray
+	// was in, so the light it carries back is absorbed per colour.
+	if (ps.medium != 0u) {
+		ps.throughput *= exp(-materials[ps.medium - 1u].medium_absorption.xyz * gl_HitTEXT);
 	}
 
 	uint total_bounces = get_total_bounces(ps.packed_bounces_flags);
