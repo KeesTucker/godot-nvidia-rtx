@@ -46,10 +46,16 @@
 // RT_PARAM_VIS_MODE values. Must match Environment::PathtracingDebugMode.
 #define RT_VIS_TRANSPARENCY_LAYERS 23
 #define RT_VIS_DYNAMIC_GEOMETRY 29
+#define RT_VIS_MOTION_VECTORS 30
+
+// True when hits shade normally under p_vis_mode, and raygen swaps in the debug view at the end.
+bool rt_debug_shades_normally(int p_vis_mode) {
+	return p_vis_mode == 0 || p_vis_mode == RT_VIS_TRANSPARENCY_LAYERS || p_vis_mode == RT_VIS_MOTION_VECTORS;
+}
 
 // True when p_vis_mode traces transparency peels: normal shading, and the debug views that show transparent layers.
 bool rt_debug_keeps_transparency(int p_vis_mode) {
-	return p_vis_mode == 0 || p_vis_mode == RT_VIS_TRANSPARENCY_LAYERS || p_vis_mode == RT_VIS_DYNAMIC_GEOMETRY;
+	return p_vis_mode == 0 || p_vis_mode == RT_VIS_TRANSPARENCY_LAYERS || p_vis_mode == RT_VIS_DYNAMIC_GEOMETRY || p_vis_mode == RT_VIS_MOTION_VECTORS;
 }
 // ============================================================================
 // PATHTRACING PAYLOAD (36 bytes, fp16/unorm-packed)
