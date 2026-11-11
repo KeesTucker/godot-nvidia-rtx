@@ -23,8 +23,8 @@ uint rt_entry_material_flags(uint p_geometry_idx) {
 vec3 rt_shadow_dielectric_crossing_transmittance(MaterialData p_mat, bool p_is_front_face, float p_hit_t, float p_ray_end_t) {
 	uint entered_medium = p_is_front_face ? p_mat.inside_medium : p_mat.outside_medium;
 	uint left_medium = p_is_front_face ? p_mat.outside_medium : p_mat.inside_medium;
-	vec3 absorption_change = rt_medium_absorption(entered_medium) - rt_medium_absorption(left_medium);
+	vec3 extinction_change = rt_medium_extinction(entered_medium) - rt_medium_extinction(left_medium);
 	float rest_of_ray = max(p_ray_end_t - p_hit_t, 0.0);
-	return exp(-absorption_change * rest_of_ray);
+	return exp(-extinction_change * rest_of_ray);
 }
 #endif

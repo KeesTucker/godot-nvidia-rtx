@@ -57,8 +57,12 @@ declares `uniform int rt_medium` for behind its back faces and
 and every face bounding the water agrees on it. Transparency peel layers use
 the medium their segment started in, and are absorbed by it. Shadow rays now pass straight through dielectrics (unbent)
 and pick up each medium's absorption on the way. The any-hit multiplies in one
-factor per crossing that doesn't depend on hit order. Still to do:
-Henyey–Greenstein in-scattering, steps 3 and 4. Step 3's light source is the
+factor per crossing that doesn't depend on hit order. Haze is in: every
+segment in a scattering medium loses its extinction (absorption + scattering)
+and gains single scattering of one light at one equiangular point, with a
+Henyey–Greenstein phase and a shadow ray. Exact to first order in optical
+depth; multiple scattering is left out, which is fine for thin haze. Costs
+about 0.9 ms in seagrass-tank. Still to do: steps 3 and 4. Step 3's light source is the
 project's LED bar, not a sun.
 
 ## Diffuse transmission for bounce light

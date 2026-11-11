@@ -250,22 +250,22 @@ vec3 lights_projector_color(RTLightData light, vec3 p_dir) {
 // Uses SkipClosestHitShader so only any_hit (alpha test) and miss are invoked.
 // TerminateOnFirstHit exits on the first opaque or stochastic alpha blocker.
 // p_shadow_mask is the light's 8-bit shadow-caster group mask.
-// Dielectrics don't block; the ray goes straight through them, absorbed by each
-// medium on the way. It starts in the medium of the path being shaded, which
+// Dielectrics don't block; the ray goes straight through them, dimmed by each
+// medium's extinction on the way. It starts in the medium of the path being shaded, which
 // is still in payload.
 vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p_shadow_mask, inout uint rng_state) {
-	vec3 origin_absorption = rt_medium_absorption(payload.medium);
+	vec3 origin_extinction = rt_medium_extinction(payload.medium);
 #ifdef USE_RAY_QUERY_SHADOWS
 	// Ray queries are faster but approximate custom or animated material outputs
 	// with a direct albedo texture sample.
-	return ray_query_shadow_transmittance(origin, direction, 0.001, max_dist - 0.001, p_shadow_mask, 0.0, origin_absorption, rng_state);
+	return ray_query_shadow_transmittance(origin, direction, 0.001, max_dist - 0.001, p_shadow_mask, 0.0, origin_extinction, rng_state);
 #elif defined(USE_SER)
 	PathPayload saved_payload = payload;
 	PathState shadow_ps;
 	shadow_ps.radiance = vec3(0.0);
 	// The any-hit shader multiplies in each dielectric crossing. It needs the
 	// ray's end, which gl_RayTmaxEXT doesn't give it there, so hit_t carries it.
-	shadow_ps.throughput = exp(-origin_absorption * (max_dist - 0.001));
+	shadow_ps.throughput = exp(-origin_extinction * (max_dist - 0.001));
 	shadow_ps.packed_bounces_flags = set_shadow_ray(0u);
 	shadow_ps.rng_state = rng_state;
 	shadow_ps.hit_t = max_dist - 0.001;
@@ -292,7 +292,7 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 
 	PathState shadow_ps;
 	shadow_ps.radiance = vec3(0.0);
-	shadow_ps.throughput = exp(-origin_absorption * (max_dist - 0.001));
+	shadow_ps.throughput = exp(-origin_extinction * (max_dist - 0.001));
 	shadow_ps.packed_bounces_flags = set_shadow_ray(0u);
 	shadow_ps.rng_state = rng_state;
 	shadow_ps.hit_t = max_dist - 0.001; // The ray's end, for the any-hit shader.
@@ -535,4 +535,78 @@ vec3 lights_evaluate_direct_lighting_per_group(
 		result += contribution / max(select_pdf, 1e-10);
 	}
 	return result;
+}
+
+// ============================================================================
+// Single scattering in a medium (haze)
+// ============================================================================
+
+// Henyey–Greenstein phase function, per steradian. p_cos_theta is between the
+// light's direction of travel before and after scattering.
+float lights_henyey_greenstein(float p_cos_theta, float p_g) {
+	float denominator = 1.0 + p_g * p_g - 2.0 * p_g * p_cos_theta;
+	return (1.0 - p_g * p_g) / (4.0 * PI * denominator * sqrt(denominator));
+}
+
+// lights_evaluate_in_scattering estimates the light one omni or spot light
+// scatters into a ray segment in a homogeneous medium, toward the segment's
+// origin: one point picked equiangularly about the light, which keeps the
+// noise low near small lights, and one shadow ray. The caller scales it by the
+// throughput at the segment's start. Directional lights don't scatter here.
+vec3 lights_evaluate_in_scattering(vec3 p_origin, vec3 p_direction, float p_length,
+		vec3 p_extinction_per_m, vec3 p_scattering_per_m, float p_anisotropy,
+		uint light_count, bool is_indirect_bounce, inout uint rng_state) {
+	uint directional_count = lights_directional_count(light_count);
+	vec3 segment_middle = p_origin + p_direction * (0.5 * p_length);
+	uint idx;
+	float select_pdf;
+	if (!lights_select(segment_middle, directional_count, light_count - directional_count, 0xFFFFFu, rng_state, idx, select_pdf)) {
+		return vec3(0.0);
+	}
+	RTLightData light = lights_get(idx);
+
+	// Equiangular sampling: uniform in the angle the segment subtends at the light.
+	float along_to_closest = dot(light.position - p_origin, p_direction);
+	float closest_distance = max(length(p_origin + p_direction * along_to_closest - light.position), 1e-4);
+	float start_angle = atan(-along_to_closest, closest_distance);
+	float end_angle = atan(p_length - along_to_closest, closest_distance);
+	float angle = mix(start_angle, end_angle, rand(rng_state));
+	float t = clamp(along_to_closest + closest_distance * tan(angle), 0.0, p_length);
+	float offset_from_closest = t - along_to_closest;
+	float t_pdf = closest_distance / (max(end_angle - start_angle, 1e-6) * (closest_distance * closest_distance + offset_from_closest * offset_from_closest));
+
+	vec3 scatter_pos = p_origin + p_direction * t;
+	vec3 to_light = light.position - scatter_pos;
+	float dist_sq = dot(to_light, to_light);
+	if (light.max_range_squared != 0.0 && dist_sq > light.max_range_squared) {
+		return vec3(0.0);
+	}
+	float dist = sqrt(dist_sq);
+	vec3 L = to_light / max(dist, 1e-4);
+
+	float spot_atten = 1.0;
+	if (light.type == RT_LIGHT_TYPE_SPOT) {
+		float one_minus_scos = 1.0 + dot(L, lights_rotate(light.orientation, vec3(0.0, 0.0, -1.0)));
+		if (one_minus_scos >= light.one_minus_cos_spot) {
+			return vec3(0.0);
+		}
+		float spot_rim = max(1e-4, one_minus_scos / light.one_minus_cos_spot);
+		spot_atten = 1.0 - pow(spot_rim, light.inv_spot_attenuation);
+	}
+	vec3 projector_color = lights_projector_color(light, -L);
+
+	// Stop at the emitter's surface, as surface NEE does for sphere lights.
+	float shadow_dist = max(dist - max(light.radius, 0.0), 1e-4);
+	uint receiver_shadow_mask = ~uint(get_rt_param(RT_PARAM_SELF_SHADOW_MASK)) & 0xFFu;
+	vec3 shadow_transmittance = lights_shadow_transmittance(light, scatter_pos, L, shadow_dist, receiver_shadow_mask, rng_state);
+
+	LightSample ls_atten;
+	ls_atten.distance_sq = dist_sq;
+	float atten = lights_get_attenuation(ls_atten, light.inv_max_range, light.attenuation) * spot_atten;
+	float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
+
+	vec3 transmittance_to_scatter = exp(-p_extinction_per_m * t);
+	float phase = lights_henyey_greenstein(dot(L, p_direction), p_anisotropy);
+	vec3 incoming = light.emission * projector_color * shadow_transmittance * atten * indirect_mul;
+	return transmittance_to_scatter * p_scattering_per_m * phase * incoming / (t_pdf * max(select_pdf, 1e-10));
 }

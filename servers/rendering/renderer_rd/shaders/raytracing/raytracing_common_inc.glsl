@@ -88,6 +88,11 @@ vec3 rt_medium_scattering(uint p_medium) {
 	return rt_medium_global(rt_medium_slots(p_medium).z, vec4(0.0)).xyz;
 }
 
+// Light a medium takes off a straight path per metre: absorbed or scattered away.
+vec3 rt_medium_extinction(uint p_medium) {
+	return rt_medium_absorption(p_medium) + rt_medium_scattering(p_medium);
+}
+
 // Henyey–Greenstein g of a medium's scattering.
 float rt_medium_scattering_anisotropy(uint p_medium) {
 	return rt_medium_global(rt_medium_slots(p_medium).w, vec4(0.0)).x;

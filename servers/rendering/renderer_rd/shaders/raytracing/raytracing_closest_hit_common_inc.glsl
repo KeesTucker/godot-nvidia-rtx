@@ -882,10 +882,14 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 #endif
 
 	// Beer–Lambert: the segment that ends here ran through the medium the ray
-	// was in, so the light it carries back is absorbed per colour. Peel layers
-	// too: a flake in the water is seen through the water in front of it.
+	// was in, so the light it carries back is absorbed and scattered away per
+	// colour. Peel layers too: a flake in the water is seen through the water
+	// in front of it. The light scattered into the segment is added below.
+	vec3 segment_start_throughput = ps.throughput;
+	vec3 medium_scattering_per_m = rt_medium_scattering(ps.medium);
+	vec3 medium_extinction_per_m = rt_medium_absorption(ps.medium) + medium_scattering_per_m;
 	if (ps.medium != 0u) {
-		ps.throughput *= exp(-rt_medium_absorption(ps.medium) * gl_HitTEXT);
+		ps.throughput *= exp(-medium_extinction_per_m * gl_HitTEXT);
 	}
 
 	if ((ps.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
@@ -970,6 +974,15 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 
 	path_pack(payload, ps);
 	ps.radiance += ps.throughput * shade_local_surface(h, m, N, V, diffuse_bounces > 0u, ps.rng_state);
+
+	// Haze: single scattering of the lights into this segment. Only the opaque
+	// hit adds it, so peel layers inside the segment don't count it twice.
+	bool is_in_scattering_medium = any(greaterThan(medium_scattering_per_m, vec3(0.0)));
+	if (is_in_scattering_medium) {
+		ps.radiance += segment_start_throughput * lights_evaluate_in_scattering(gl_WorldRayOriginEXT, gl_WorldRayDirectionEXT, gl_HitTEXT,
+				medium_extinction_per_m, medium_scattering_per_m, rt_medium_scattering_anisotropy(ps.medium),
+				uint(get_rt_param(RT_PARAM_LIGHT_COUNT)), diffuse_bounces > 0u, ps.rng_state);
+	}
 
 	// =================================================================
 	// DLSS Ray Reconstruction output (primary ray, sample 0 only)
