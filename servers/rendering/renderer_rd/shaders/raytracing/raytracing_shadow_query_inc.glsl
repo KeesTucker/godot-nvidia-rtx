@@ -31,8 +31,10 @@ bool ray_query_alpha_test(uint geometry_idx, uint primitive_id, vec2 candidate_b
 
 // Colored transmittance along the ray, 0 when an opaque caster is hit. Transparent casters tint the light
 // stochastically by coverage, so all candidates must be visited (no opaque traversal flags).
-vec3 ray_query_shadow_transmittance(vec3 origin, vec3 direction, float t_min, float t_max, uint mask, float lod, inout uint rng_state) {
-	vec3 transmittance = vec3(1.0);
+// Dielectrics don't block: the ray passes straight through, absorbed by each medium it runs through,
+// starting in one that absorbs p_origin_absorption per metre.
+vec3 ray_query_shadow_transmittance(vec3 origin, vec3 direction, float t_min, float t_max, uint mask, float lod, vec3 p_origin_absorption, inout uint rng_state) {
+	vec3 transmittance = exp(-p_origin_absorption * t_max);
 	rayQueryEXT shadow_rq;
 	rayQueryInitializeEXT(shadow_rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsNoOpaqueEXT, mask, origin, t_min, direction, t_max);
 
@@ -42,6 +44,12 @@ vec3 ray_query_shadow_transmittance(vec3 origin, vec3 direction, float t_min, fl
 		}
 		uint geometry_idx = RT_RQ_GEOMETRY_IDX(shadow_rq, false);
 		uint mat_flags = rt_entry_material_flags(geometry_idx);
+		if ((mat_flags & RT_MAT_FLAG_DIELECTRIC) != 0u) {
+			bool is_front_face = rayQueryGetIntersectionFrontFaceEXT(shadow_rq, false) != ((geometries[geometry_idx].flags & FLAG_FACING_INVERTED) != 0u);
+			transmittance *= rt_shadow_dielectric_crossing_transmittance(rt_entry_material(geometry_idx), is_front_face,
+					rayQueryGetIntersectionTEXT(shadow_rq, false), t_max);
+			continue;
+		}
 		if ((mat_flags & (RT_MAT_FLAG_TRANSPARENT | RT_MAT_FLAG_ALPHA_SCISSOR)) == 0u) {
 			rayQueryConfirmIntersectionEXT(shadow_rq);
 			continue;

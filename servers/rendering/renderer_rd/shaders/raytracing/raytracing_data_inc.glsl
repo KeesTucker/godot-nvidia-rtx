@@ -188,3 +188,14 @@ vec3 rt_material_surface_params(MaterialData p_mat) {
 float rt_material_index_of_refraction(MaterialData p_mat) {
 	return 1.0 + unpackUnorm4x8(p_mat.surface_params).w;
 }
+
+// rt_shadow_dielectric_crossing_transmittance is the factor a shadow ray picks
+// up where it crosses a dielectric at p_hit_t, given it starts with
+// exp(-sigma_origin * p_ray_end_t). Each crossing swaps sigma for the rest of
+// the ray, so the factors multiply in any order, as any-hit needs.
+vec3 rt_shadow_dielectric_crossing_transmittance(MaterialData p_mat, bool p_is_front_face, float p_hit_t, float p_ray_end_t) {
+	vec3 entered_absorption = p_is_front_face ? p_mat.medium_absorption.xyz : p_mat.outside_medium_absorption.xyz;
+	vec3 left_absorption = p_is_front_face ? p_mat.outside_medium_absorption.xyz : p_mat.medium_absorption.xyz;
+	float rest_of_ray = max(p_ray_end_t - p_hit_t, 0.0);
+	return exp(-(entered_absorption - left_absorption) * rest_of_ray);
+}

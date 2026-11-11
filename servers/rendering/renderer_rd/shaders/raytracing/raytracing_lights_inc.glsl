@@ -250,19 +250,25 @@ vec3 lights_projector_color(RTLightData light, vec3 p_dir) {
 // Uses SkipClosestHitShader so only any_hit (alpha test) and miss are invoked.
 // TerminateOnFirstHit exits on the first opaque or stochastic alpha blocker.
 // p_shadow_mask is the light's 8-bit shadow-caster group mask.
+// Dielectrics don't block; the ray goes straight through them, absorbed by each
+// medium on the way. It starts in the medium of the path being shaded, which
+// is still in payload.
 vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p_shadow_mask, inout uint rng_state) {
+	vec3 origin_absorption = rt_medium_absorption(payload.medium);
 #ifdef USE_RAY_QUERY_SHADOWS
 	// Ray queries are faster but approximate custom or animated material outputs
 	// with a direct albedo texture sample.
-	return ray_query_shadow_transmittance(origin, direction, 0.001, max_dist - 0.001, p_shadow_mask, 0.0, rng_state);
+	return ray_query_shadow_transmittance(origin, direction, 0.001, max_dist - 0.001, p_shadow_mask, 0.0, origin_absorption, rng_state);
 #elif defined(USE_SER)
 	PathPayload saved_payload = payload;
 	PathState shadow_ps;
 	shadow_ps.radiance = vec3(0.0);
-	shadow_ps.throughput = vec3(1.0);
+	// The any-hit shader multiplies in each dielectric crossing. It needs the
+	// ray's end, which gl_RayTmaxEXT doesn't give it there, so hit_t carries it.
+	shadow_ps.throughput = exp(-origin_absorption * (max_dist - 0.001));
 	shadow_ps.packed_bounces_flags = set_shadow_ray(0u);
 	shadow_ps.rng_state = rng_state;
-	shadow_ps.hit_t = 0.0;
+	shadow_ps.hit_t = max_dist - 0.001;
 	shadow_ps.offset_normal = vec3(0.0, 0.0, 1.0);
 	shadow_ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
 	shadow_ps.medium = 0u;
@@ -286,10 +292,10 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 
 	PathState shadow_ps;
 	shadow_ps.radiance = vec3(0.0);
-	shadow_ps.throughput = vec3(1.0);
+	shadow_ps.throughput = exp(-origin_absorption * (max_dist - 0.001));
 	shadow_ps.packed_bounces_flags = set_shadow_ray(0u);
 	shadow_ps.rng_state = rng_state;
-	shadow_ps.hit_t = 0.0;
+	shadow_ps.hit_t = max_dist - 0.001; // The ray's end, for the any-hit shader.
 	shadow_ps.offset_normal = vec3(0.0, 0.0, 1.0);
 	shadow_ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
 	shadow_ps.medium = 0u;

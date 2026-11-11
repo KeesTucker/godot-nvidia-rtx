@@ -52,9 +52,11 @@ Beer–Lambert absorption (4952156). Since ab953e0, faces are two-sided: a
 custom shader declares `rt_index_of_refraction` and `rt_absorption_per_m` for
 behind its back face, and `rt_outside_index_of_refraction` (0 = air) and
 `rt_outside_absorption_per_m` for in front of it, so one face can separate
-glass from water. Still to do: Henyey–Greenstein in-scattering, absorption on
-shadow rays, steps 3 and 4. Step 3's light source is the project's LED bar,
-not a sun.
+glass from water. Shadow rays now pass straight through dielectrics (unbent)
+and pick up each medium's absorption on the way. The any-hit multiplies in one
+factor per crossing that doesn't depend on hit order. Still to do:
+Henyey–Greenstein in-scattering, steps 3 and 4. Step 3's light source is the
+project's LED bar, not a sun.
 
 ## Diffuse transmission for bounce light
 

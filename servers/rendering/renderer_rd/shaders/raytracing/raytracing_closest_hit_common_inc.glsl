@@ -638,15 +638,6 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 	return lit;
 }
 
-// Absorption per metre of the medium a path is in; zero in air.
-vec3 rt_medium_absorption(uint p_medium) {
-	if (p_medium == 0u) {
-		return vec3(0.0);
-	}
-	MaterialData medium_material = materials[(p_medium & ~RT_MEDIUM_OUTSIDE_BIT) - 1u];
-	return (p_medium & RT_MEDIUM_OUTSIDE_BIT) != 0u ? medium_material.outside_medium_absorption.xyz : medium_material.medium_absorption.xyz;
-}
-
 // Smooth dielectric (water, glass): reflect with probability equal to the
 // exact Fresnel reflectance, otherwise refract; total internal reflection
 // always reflects. The surface separates its outside (front faces, air unless

@@ -942,6 +942,16 @@ void main() {
 	uint geometry_idx = RT_HIT_GEOMETRY_IDX;
 	GeometryData geom = geometries[geometry_idx];
 	MaterialData mat = rt_entry_material(geometry_idx);
+	// A shadow ray goes straight through a dielectric and swaps the medium
+	// absorbing it. In any-hit, gl_RayTmaxEXT is this hit, not the ray's end,
+	// so lights_trace_shadow_ray() passes the end in hit_t.
+	bool is_dielectric = (mat.flags & RT_MAT_FLAG_DIELECTRIC) != 0u;
+	if (is_dielectric && is_shadow_ray(payload.packed_bounces_flags)) {
+		PathState shadow_ps = path_unpack(payload);
+		shadow_ps.throughput *= rt_shadow_dielectric_crossing_transmittance(mat, rt_triangle_front_facing(geom), gl_HitTEXT, shadow_ps.hit_t);
+		path_pack(payload, shadow_ps);
+		ignoreIntersectionEXT;
+	}
 	bool transparent = (mat.flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
 	bool alpha_scissor = (mat.flags & RT_MAT_FLAG_ALPHA_SCISSOR) != 0u;
 	if (!transparent && !alpha_scissor) {
