@@ -62,8 +62,11 @@ segment in a scattering medium loses its extinction (absorption + scattering)
 and gains single scattering of one light at one equiangular point, with a
 Henyey–Greenstein phase and a shadow ray. Exact to first order in optical
 depth; multiple scattering is left out, which is fine for thin haze. Costs
-about 0.9 ms in seagrass-tank. Still to do: steps 3 and 4. Step 3's light source is the
-project's LED bar, not a sun.
+about 0.9 ms in seagrass-tank. Step 4 is in: a primary dielectric hit sends
+a guide ray through the glass and water to the surface behind, whose depth,
+motion, normal, roughness and albedos replace the dielectric's guides at its
+apparent position. Still to do: step 3. Its light source is the project's
+LED bar, not a sun.
 
 ## Diffuse transmission for bounce light
 
