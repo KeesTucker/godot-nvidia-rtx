@@ -130,7 +130,7 @@ struct MaterialData {
 	vec3 uv1_scale; // UV1 scale (default 1,1,1)
 	float normal_map_depth; // Normal map strength (default 1.0)
 	vec3 uv1_offset; // UV1 offset (default 0,0,0)
-	uint surface_params; // unorm8x4: roughness, metallic, specular, IOR - 1. See rt_material_surface_params().
+	uint surface_params; // unorm8x4: roughness, metallic, specular, unused. See rt_material_surface_params().
 
 	uint uv2_scale_xy; // fp16x2. UV2 transform: identity unless triplanar or applied by the vertex stage.
 	uint flags; // See RT_MAT_FLAG_*.
@@ -145,15 +145,13 @@ struct MaterialData {
 	uint ao_texture; // AO texture when AO is enabled; 0 (white) otherwise.
 	float emission_indirect; // BaseMaterial3D emission_indirect_energy, see MaterialResult::emission_indirect.
 
-	// A RT_MAT_FLAG_DIELECTRIC surface separates two media. Back faces see the
-	// inside (index of refraction in surface_params), front faces the outside.
-	vec4 medium_absorption; // xyz: absorption per metre inside (rt_absorption_per_m); w: outside index of refraction, 0 = air.
-	vec4 outside_medium_absorption; // xyz: absorption per metre outside (rt_outside_absorption_per_m), w unused.
+	// A RT_MAT_FLAG_DIELECTRIC surface separates two media, by id into
+	// rt_media: behind its back faces (rt_medium) and in front of its front
+	// faces (rt_outside_medium, 0 = air).
+	uint inside_medium;
+	uint outside_medium;
+	uint medium_padding[2];
 };
-
-// PathState::medium is a material index + 1, with this bit set when the ray is
-// in that dielectric's outside medium rather than its inside one.
-#define RT_MEDIUM_OUTSIDE_BIT (1u << 31)
 
 // Bindless index of a MaterialData *_texture.
 uint rt_texture_index(uint p_texture) {
@@ -182,20 +180,4 @@ float rt_entry_alpha(MaterialData p_mat, float p_alpha, float p_scissor_threshol
 // BaseMaterial3D roughness, metallic, specular (x, y, z).
 vec3 rt_material_surface_params(MaterialData p_mat) {
 	return unpackUnorm4x8(p_mat.surface_params).xyz;
-}
-
-// Index of refraction of a RT_MAT_FLAG_DIELECTRIC material.
-float rt_material_index_of_refraction(MaterialData p_mat) {
-	return 1.0 + unpackUnorm4x8(p_mat.surface_params).w;
-}
-
-// rt_shadow_dielectric_crossing_transmittance is the factor a shadow ray picks
-// up where it crosses a dielectric at p_hit_t, given it starts with
-// exp(-sigma_origin * p_ray_end_t). Each crossing swaps sigma for the rest of
-// the ray, so the factors multiply in any order, as any-hit needs.
-vec3 rt_shadow_dielectric_crossing_transmittance(MaterialData p_mat, bool p_is_front_face, float p_hit_t, float p_ray_end_t) {
-	vec3 entered_absorption = p_is_front_face ? p_mat.medium_absorption.xyz : p_mat.outside_medium_absorption.xyz;
-	vec3 left_absorption = p_is_front_face ? p_mat.outside_medium_absorption.xyz : p_mat.medium_absorption.xyz;
-	float rest_of_ray = max(p_ray_end_t - p_hit_t, 0.0);
-	return exp(-(entered_absorption - left_absorption) * rest_of_ray);
 }

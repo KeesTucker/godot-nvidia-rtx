@@ -178,7 +178,7 @@ struct alignas(16) RT_MaterialData {
 		uint32_t roughness : 8;
 		uint32_t metallic : 8;
 		uint32_t specular : 8; // Dielectric specular, default 0.5 -> F0 = 0.04.
-		uint32_t index_of_refraction : 8; // (IOR - 1) as unorm8, read when RT_MAT_FLAG_DIELECTRIC is set.
+		uint32_t unused : 8;
 	} surface_params;
 	// UV2 transform, fp16 (see rt_material_set_packed_uv()): identity unless triplanar or applied by the vertex stage.
 	struct {
@@ -213,10 +213,13 @@ struct alignas(16) RT_MaterialData {
 		uint32_t channel : 8; // RTTextureChannel (GLSL rt_texture_channel()).
 	} ao_texture;
 	float emission_indirect; // BaseMaterial3D emission_indirect_energy: emission weight on indirect paths.
-	float medium_absorption[4]; // xyz: absorption per metre inside a dielectric (rt_absorption_per_m); w: outside IOR, 0 = air.
-	float outside_medium_absorption[4]; // xyz: absorption per metre outside a dielectric (rt_outside_absorption_per_m), w unused.
+	// Media ids (RT_MEDIA_COUNT) either side of a RT_MAT_FLAG_DIELECTRIC surface:
+	// behind its back faces (rt_medium) and in front of its front faces (rt_outside_medium, 0 = air).
+	uint32_t inside_medium;
+	uint32_t outside_medium;
+	uint32_t medium_padding[2];
 };
-static_assert(sizeof(RT_MaterialData) == 160, "RT_MaterialData must be 160 bytes for std430, with every bitfield struct in one uint");
+static_assert(sizeof(RT_MaterialData) == 144, "RT_MaterialData must be 144 bytes for std430, with every bitfield struct in one uint");
 static_assert(BindlessBlock::MAX_BINDLESS_TEXTURES <= (1u << RT_MaterialData::TEXTURE_INDEX_BITS), "Bindless texture indices must fit RT_MaterialData textures");
 
 // p_value clamped to [0, 1] as GLSL unpackUnorm4x8() reads one byte.

@@ -53,13 +53,47 @@ vec2 rt_sky_oct_uv(vec3 p_world_dir) {
 	return vec3_to_oct_with_border(world_to_sky * p_world_dir, border);
 }
 
-#ifndef RT_STAGE_ANY_HIT
-
+// Any-hit reads it too, for the media a shadow ray crosses.
 layout(set = 0, binding = 6, std140) uniform RaytracingParams {
 	vec4 rt_params[RT_PARAM_COUNT / 4];
 	mat4 prev_vp_unjittered;
 	mat4 curr_vp_unjittered;
+	// rt_media[id]: global_shader_uniforms slots of medium id's
+	// rt_medium_<id>_index_of_refraction, _absorption_per_m, _scattering_per_m
+	// and _scattering_anisotropy globals, -1 where undefined. Medium 0 is air.
+	ivec4 rt_media[RT_MEDIA_COUNT];
 };
+
+// rt_medium_global reads a medium property's live global value, or p_default
+// when the project didn't define it.
+vec4 rt_medium_global(int p_slot, vec4 p_default) {
+	return p_slot >= 0 ? global_shader_uniforms.data[p_slot] : p_default;
+}
+
+ivec4 rt_medium_slots(uint p_medium) {
+	return p_medium < uint(RT_MEDIA_COUNT) ? rt_media[p_medium] : ivec4(-1);
+}
+
+float rt_medium_index_of_refraction(uint p_medium) {
+	return rt_medium_global(rt_medium_slots(p_medium).x, vec4(1.0)).x;
+}
+
+// Absorption per metre of a medium (PathState::medium); zero in air.
+vec3 rt_medium_absorption(uint p_medium) {
+	return rt_medium_global(rt_medium_slots(p_medium).y, vec4(0.0)).xyz;
+}
+
+// Scattering per metre of a medium; zero in air.
+vec3 rt_medium_scattering(uint p_medium) {
+	return rt_medium_global(rt_medium_slots(p_medium).z, vec4(0.0)).xyz;
+}
+
+// Henyey–Greenstein g of a medium's scattering.
+float rt_medium_scattering_anisotropy(uint p_medium) {
+	return rt_medium_global(rt_medium_slots(p_medium).w, vec4(0.0)).x;
+}
+
+#ifndef RT_STAGE_ANY_HIT
 
 float get_rt_param(uint idx) {
 	return rt_params[idx >> 2u][idx & 3u];

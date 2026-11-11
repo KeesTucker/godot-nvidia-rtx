@@ -683,6 +683,7 @@ bool RenderForwardClusteredPT::_setup_rt() {
 		rt_defines += "\n#define RT 1\n";
 		rt_defines += "\n#define MAX_ROUGHNESS_LOD " + itos(get_roughness_layers() - 1) + ".0\n";
 		rt_defines += "\n#define RT_PARAM_COUNT " + itos(SceneShaderRaytracing::RT_PARAM_COUNT) + "\n";
+		rt_defines += "\n#define RT_MEDIA_COUNT " + itos(SceneShaderRaytracing::RT_MEDIA_COUNT) + "\n";
 		if (is_using_radiance_octmap_array()) {
 			rt_defines += "\n#define USE_RADIANCE_OCTMAP_ARRAY \n";
 		}

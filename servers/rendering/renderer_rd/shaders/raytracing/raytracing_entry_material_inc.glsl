@@ -15,11 +15,16 @@ uint rt_entry_material_flags(uint p_geometry_idx) {
 	return materials[geometries[p_geometry_idx].material_index & RT_MATERIAL_INDEX_MASK].flags | geometries[p_geometry_idx].material_flags;
 }
 
-// Absorption per metre of the medium a path is in (PathState::medium); zero in air.
-vec3 rt_medium_absorption(uint p_medium) {
-	if (p_medium == 0u) {
-		return vec3(0.0);
-	}
-	MaterialData medium_material = materials[(p_medium & ~RT_MEDIUM_OUTSIDE_BIT) - 1u];
-	return (p_medium & RT_MEDIUM_OUTSIDE_BIT) != 0u ? medium_material.outside_medium_absorption.xyz : medium_material.medium_absorption.xyz;
+#ifdef RT_MEDIA_COUNT
+// rt_shadow_dielectric_crossing_transmittance is the factor a shadow ray picks
+// up where it crosses a dielectric at p_hit_t, given it starts with
+// exp(-sigma_origin * p_ray_end_t). Each crossing swaps sigma for the rest of
+// the ray, so the factors multiply in any order, as any-hit needs.
+vec3 rt_shadow_dielectric_crossing_transmittance(MaterialData p_mat, bool p_is_front_face, float p_hit_t, float p_ray_end_t) {
+	uint entered_medium = p_is_front_face ? p_mat.inside_medium : p_mat.outside_medium;
+	uint left_medium = p_is_front_face ? p_mat.outside_medium : p_mat.inside_medium;
+	vec3 absorption_change = rt_medium_absorption(entered_medium) - rt_medium_absorption(left_medium);
+	float rest_of_ray = max(p_ray_end_t - p_hit_t, 0.0);
+	return exp(-absorption_change * rest_of_ray);
 }
+#endif

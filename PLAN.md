@@ -48,11 +48,14 @@ This goes into the renderer itself, not `drivers/streamline/`, so expect harder
 upstream merges in `servers/rendering/renderer_rd/` from here on.
 
 *Built (2026-11-11):* step 1 (e501664), and step 2's medium tracking with
-Beer–Lambert absorption (4952156). Since ab953e0, faces are two-sided: a
-custom shader declares `rt_index_of_refraction` and `rt_absorption_per_m` for
-behind its back face, and `rt_outside_index_of_refraction` (0 = air) and
-`rt_outside_absorption_per_m` for in front of it, so one face can separate
-glass from water. Shadow rays now pass straight through dielectrics (unbent)
+Beer–Lambert absorption (4952156). Media are now shared: a medium is a set of
+global shader parameters, `rt_medium_<id>_index_of_refraction`,
+`_absorption_per_m`, `_scattering_per_m` and `_scattering_anisotropy` (ids
+1–7, 0 = air), read live from the global uniform buffer. A dielectric shader
+declares `uniform int rt_medium` for behind its back faces and
+`rt_outside_medium` for in front, so one face can separate glass from water
+and every face bounding the water agrees on it. Transparency peel layers use
+the medium their segment started in, and are absorbed by it. Shadow rays now pass straight through dielectrics (unbent)
 and pick up each medium's absorption on the way. The any-hit multiplies in one
 factor per crossing that doesn't depend on hit order. Still to do:
 Henyey–Greenstein in-scattering, steps 3 and 4. Step 3's light source is the

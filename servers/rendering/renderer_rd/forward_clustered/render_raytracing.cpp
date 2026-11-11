@@ -3280,29 +3280,20 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			rt_state.orm ? 1.0f : get_float("metallic", 0.0f), get_float("specular", 0.5f));
 	// Also weights unshaded albedo, so it is read with the emission feature disabled.
 	mat.emission_indirect = get_float("emission_indirect_energy", 1.0f);
-	// Refraction is opt-in: a shader declares `uniform float rt_index_of_refraction`
-	// (1.0-2.0). The path tracer then reflects or refracts by Fresnel at its hits.
-	const float index_of_refraction = get_float("rt_index_of_refraction", 0.0f);
-	if (index_of_refraction > 1.0f) {
+	// Refraction is opt-in: a shader declares `uniform int rt_medium`, the
+	// medium behind its back faces, and optionally `uniform int
+	// rt_outside_medium` in front (0 = air). The media themselves are global
+	// shader parameters, so every surface bounding one medium agrees on it (see
+	// RT_MEDIA_COUNT).
+	auto get_medium = [&](const StringName &p_param) -> uint32_t {
+		const Variant value = material_storage->material_get_param(p_material_rid, p_param);
+		const bool is_valid_medium = value.get_type() == Variant::INT && int64_t(value) > 0 && int64_t(value) < SceneShaderRaytracing::RT_MEDIA_COUNT;
+		return is_valid_medium ? uint32_t(int64_t(value)) : 0u;
+	};
+	mat.inside_medium = get_medium("rt_medium");
+	mat.outside_medium = get_medium("rt_outside_medium");
+	if (mat.inside_medium != 0u) {
 		mat.flags |= RT_MAT_FLAG_DIELECTRIC;
-		mat.surface_params.index_of_refraction = rt_unorm8(index_of_refraction - 1.0f);
-		// The media on either side absorb per colour (Beer–Lambert):
-		// `uniform vec3 rt_absorption_per_m` inside (behind back faces) and
-		// `uniform vec3 rt_outside_absorption_per_m` outside. Outside is air
-		// unless `uniform float rt_outside_index_of_refraction` says otherwise,
-		// so a glass pane's inner face can be glass on one side, water on the other.
-		auto get_vector3 = [&](const StringName &p_param, float r_values[4]) {
-			const Variant value = material_storage->material_get_param(p_material_rid, p_param);
-			if (value.get_type() == Variant::VECTOR3) {
-				const Vector3 vector = value;
-				r_values[0] = vector.x;
-				r_values[1] = vector.y;
-				r_values[2] = vector.z;
-			}
-		};
-		get_vector3("rt_absorption_per_m", mat.medium_absorption);
-		get_vector3("rt_outside_absorption_per_m", mat.outside_medium_absorption);
-		mat.medium_absorption[3] = get_float("rt_outside_index_of_refraction", 0.0f);
 	}
 
 	// Addressing stored in fp16 slots, packed once below.
@@ -5719,14 +5710,36 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(u);
 	}
 
-	// Binding 6: Raytracing params + unjittered VP matrices.
+	// Binding 6: Raytracing params + unjittered VP matrices + media table.
 	{
 		struct {
 			//TODO: I see no reason why we need to pass this as a float array
 			float params[SceneShaderRaytracing::RT_PARAM_COUNT];
 			float prev_vp_unjittered[16];
 			float curr_vp_unjittered[16];
+			int32_t media[SceneShaderRaytracing::RT_MEDIA_COUNT][4]; // GLSL rt_media.
 		} rt_ubo = {};
+
+		// Each medium's global shader parameter slots, looked up by name every
+		// frame so media added or removed at runtime are picked up. Medium 0 is air.
+		{
+			static LocalVector<StringName> medium_parameter_names;
+			if (medium_parameter_names.is_empty()) {
+				const char *medium_properties[4] = { "index_of_refraction", "absorption_per_m", "scattering_per_m", "scattering_anisotropy" };
+				for (int medium = 0; medium < SceneShaderRaytracing::RT_MEDIA_COUNT; medium++) {
+					for (int property = 0; property < 4; property++) {
+						medium_parameter_names.push_back(StringName(vformat("rt_medium_%d_%s", medium, medium_properties[property])));
+					}
+				}
+			}
+			RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+			for (int medium = 0; medium < SceneShaderRaytracing::RT_MEDIA_COUNT; medium++) {
+				for (int property = 0; property < 4; property++) {
+					const bool is_air = medium == 0;
+					rt_ubo.media[medium][property] = is_air ? -1 : material_storage->global_shader_uniform_get_buffer_index(medium_parameter_names[medium * 4 + property]);
+				}
+			}
+		}
 
 		if (p_render_data && p_render_data->environment.is_valid()) {
 			RendererEnvironmentStorage *env_storage = RendererEnvironmentStorage::get_singleton();

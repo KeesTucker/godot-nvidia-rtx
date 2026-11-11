@@ -230,6 +230,9 @@ void main() {
 			vec3 throughput_entry = ps.throughput;
 			vec3 radiance_pre = ps.radiance;
 			uint flags_entry = ps.packed_bounces_flags;
+			// The segment's medium. A dielectric at its end switches ps.medium,
+			// but the peel layers before that end are still in this one.
+			uint medium_entry = ps.medium;
 			ps.hit_t = -1.0; // A miss must not retain the previous segment's hit distance.
 			path_pack(payload, ps);
 			float t_far = (bounce == 0u) ? composite_t_max : 10000.0;
@@ -307,6 +310,7 @@ void main() {
 					}
 					ps.rng_state = continuation_rng;
 					ps.throughput = throughput_entry * T_total;
+					ps.medium = medium_entry;
 					vec3 radiance_before_layer = ps.radiance;
 					path_pack_peel(payload, ps, scene_depth);
 					traceRayEXT(tlas_transparent, RT_RAY_FLAGS, RT_TMASK_TRANSPARENT,

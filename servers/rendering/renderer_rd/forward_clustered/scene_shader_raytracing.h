@@ -117,6 +117,12 @@ public:
 	static constexpr int RT_PARAM_COUNT = 24;
 	static_assert(RT_PARAM_COUNT % 4 == 0, "rt_params is a std140 vec4 array.");
 
+	// Media a dielectric can bound, by id; 0 is air. Medium n is whichever of the global shader
+	// parameters rt_medium_<n>_index_of_refraction (float), _absorption_per_m (vec3),
+	// _scattering_per_m (vec3) and _scattering_anisotropy (float, Henyey–Greenstein g) the
+	// project defines. The shaders read them live from the global uniform buffer.
+	static constexpr int RT_MEDIA_COUNT = 8;
+
 	// Pathtracing parameter indices for the params buffer.
 	// Must match RT_PARAM_* defines in raytracing_inc.glsl.
 	static constexpr int RT_PARAM_VIS_MODE = 0;

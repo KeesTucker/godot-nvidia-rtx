@@ -45,9 +45,11 @@ vec3 ray_query_shadow_transmittance(vec3 origin, vec3 direction, float t_min, fl
 		uint geometry_idx = RT_RQ_GEOMETRY_IDX(shadow_rq, false);
 		uint mat_flags = rt_entry_material_flags(geometry_idx);
 		if ((mat_flags & RT_MAT_FLAG_DIELECTRIC) != 0u) {
+#ifdef RT_MEDIA_COUNT
 			bool is_front_face = rayQueryGetIntersectionFrontFaceEXT(shadow_rq, false) != ((geometries[geometry_idx].flags & FLAG_FACING_INVERTED) != 0u);
 			transmittance *= rt_shadow_dielectric_crossing_transmittance(rt_entry_material(geometry_idx), is_front_face,
 					rayQueryGetIntersectionTEXT(shadow_rq, false), t_max);
+#endif // Without the media table (volumetric fog), dielectrics pass light unabsorbed.
 			continue;
 		}
 		if ((mat_flags & (RT_MAT_FLAG_TRANSPARENT | RT_MAT_FLAG_ALPHA_SCISSOR)) == 0u) {
