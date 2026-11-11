@@ -486,14 +486,6 @@ void main() {
 		imageStore(image, ivec2(pixel), vec4(heat, 1.0));
 		return;
 	}
-	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == RT_VIS_MOTION_VECTORS) {
-		// The motion vector DLSS gets, in UV per frame: red/green for +x/+y,
-		// blue for -x/-y, full brightness at 1% of the screen per frame.
-		vec2 motion = imageLoad(rt_velocity_image, ivec2(pixel)).xy * 100.0;
-		vec3 motion_colour = vec3(max(motion.x, 0.0), max(motion.y, 0.0), max(-motion.x, 0.0) + max(-motion.y, 0.0));
-		imageStore(image, ivec2(pixel), vec4(motion_colour, 1.0));
-		return;
-	}
 #endif
 
 	if (composite_passthrough) {
@@ -862,8 +854,8 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		// Some views shade normally and raygen overrides the image.
-		if (!rt_debug_shades_normally(VIS_MODE)) {
+		// VIS 23 (transparency heatmap) shades normally; raygen overrides the image.
+		if (VIS_MODE != 0 && VIS_MODE != 23) {
 			debug_visualize(VIS_MODE, debug_material_inputs(h, m, ts_normal, world_tangent, world_bitangent, h.uv, ao), m.alpha);
 			return;
 		}
@@ -943,8 +935,8 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		// Some views shade normally and raygen overrides the image.
-		if (!rt_debug_shades_normally(VIS_MODE)) {
+		// VIS 23 (transparency heatmap) shades normally; raygen overrides the image.
+		if (VIS_MODE != 0 && VIS_MODE != 23) {
 			vec2 debug_uv = muv.triplanar ? muv.triplanar_pos.xy : muv.uv;
 			debug_visualize(VIS_MODE, debug_material_inputs(h, m, tangent_space_normal, h.tangent, h.bitangent, debug_uv, material_ao(mat, muv)), m.alpha);
 			return;
