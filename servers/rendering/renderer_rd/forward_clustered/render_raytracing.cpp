@@ -3286,15 +3286,23 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	if (index_of_refraction > 1.0f) {
 		mat.flags |= RT_MAT_FLAG_DIELECTRIC;
 		mat.surface_params.index_of_refraction = rt_unorm8(index_of_refraction - 1.0f);
-		// The medium behind the surface absorbs per colour (Beer–Lambert):
-		// `uniform vec3 rt_absorption_per_m`.
-		const Variant absorption = material_storage->material_get_param(p_material_rid, "rt_absorption_per_m");
-		if (absorption.get_type() == Variant::VECTOR3) {
-			const Vector3 absorption_per_m = absorption;
-			mat.medium_absorption[0] = absorption_per_m.x;
-			mat.medium_absorption[1] = absorption_per_m.y;
-			mat.medium_absorption[2] = absorption_per_m.z;
-		}
+		// The media on either side absorb per colour (Beer–Lambert):
+		// `uniform vec3 rt_absorption_per_m` inside (behind back faces) and
+		// `uniform vec3 rt_outside_absorption_per_m` outside. Outside is air
+		// unless `uniform float rt_outside_index_of_refraction` says otherwise,
+		// so a glass pane's inner face can be glass on one side, water on the other.
+		auto get_vector3 = [&](const StringName &p_param, float r_values[4]) {
+			const Variant value = material_storage->material_get_param(p_material_rid, p_param);
+			if (value.get_type() == Variant::VECTOR3) {
+				const Vector3 vector = value;
+				r_values[0] = vector.x;
+				r_values[1] = vector.y;
+				r_values[2] = vector.z;
+			}
+		};
+		get_vector3("rt_absorption_per_m", mat.medium_absorption);
+		get_vector3("rt_outside_absorption_per_m", mat.outside_medium_absorption);
+		mat.medium_absorption[3] = get_float("rt_outside_index_of_refraction", 0.0f);
 	}
 
 	// Addressing stored in fp16 slots, packed once below.

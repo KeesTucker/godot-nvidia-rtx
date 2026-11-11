@@ -213,9 +213,10 @@ struct alignas(16) RT_MaterialData {
 		uint32_t channel : 8; // RTTextureChannel (GLSL rt_texture_channel()).
 	} ao_texture;
 	float emission_indirect; // BaseMaterial3D emission_indirect_energy: emission weight on indirect paths.
-	float medium_absorption[4]; // xyz: absorption per metre inside a dielectric (rt_absorption_per_m), w unused.
+	float medium_absorption[4]; // xyz: absorption per metre inside a dielectric (rt_absorption_per_m); w: outside IOR, 0 = air.
+	float outside_medium_absorption[4]; // xyz: absorption per metre outside a dielectric (rt_outside_absorption_per_m), w unused.
 };
-static_assert(sizeof(RT_MaterialData) == 144, "RT_MaterialData must be 144 bytes for std430, with every bitfield struct in one uint");
+static_assert(sizeof(RT_MaterialData) == 160, "RT_MaterialData must be 160 bytes for std430, with every bitfield struct in one uint");
 static_assert(BindlessBlock::MAX_BINDLESS_TEXTURES <= (1u << RT_MaterialData::TEXTURE_INDEX_BITS), "Bindless texture indices must fit RT_MaterialData textures");
 
 // p_value clamped to [0, 1] as GLSL unpackUnorm4x8() reads one byte.

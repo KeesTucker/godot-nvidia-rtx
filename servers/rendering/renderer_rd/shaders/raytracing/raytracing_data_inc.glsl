@@ -145,8 +145,15 @@ struct MaterialData {
 	uint ao_texture; // AO texture when AO is enabled; 0 (white) otherwise.
 	float emission_indirect; // BaseMaterial3D emission_indirect_energy, see MaterialResult::emission_indirect.
 
-	vec4 medium_absorption; // xyz: absorption per metre inside a RT_MAT_FLAG_DIELECTRIC (rt_absorption_per_m), w unused.
+	// A RT_MAT_FLAG_DIELECTRIC surface separates two media. Back faces see the
+	// inside (index of refraction in surface_params), front faces the outside.
+	vec4 medium_absorption; // xyz: absorption per metre inside (rt_absorption_per_m); w: outside index of refraction, 0 = air.
+	vec4 outside_medium_absorption; // xyz: absorption per metre outside (rt_outside_absorption_per_m), w unused.
 };
+
+// PathState::medium is a material index + 1, with this bit set when the ray is
+// in that dielectric's outside medium rather than its inside one.
+#define RT_MEDIUM_OUTSIDE_BIT (1u << 31)
 
 // Bindless index of a MaterialData *_texture.
 uint rt_texture_index(uint p_texture) {

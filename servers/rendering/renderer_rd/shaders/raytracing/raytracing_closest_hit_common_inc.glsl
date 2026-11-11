@@ -638,14 +638,27 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 	return lit;
 }
 
+// Absorption per metre of the medium a path is in; zero in air.
+vec3 rt_medium_absorption(uint p_medium) {
+	if (p_medium == 0u) {
+		return vec3(0.0);
+	}
+	MaterialData medium_material = materials[(p_medium & ~RT_MEDIUM_OUTSIDE_BIT) - 1u];
+	return (p_medium & RT_MEDIUM_OUTSIDE_BIT) != 0u ? medium_material.outside_medium_absorption.xyz : medium_material.medium_absorption.xyz;
+}
+
 // Smooth dielectric (water, glass): reflect with probability equal to the
 // exact Fresnel reflectance, otherwise refract; total internal reflection
-// always reflects. Front faces are where the ray enters the denser medium.
+// always reflects. The surface separates its outside (front faces, air unless
+// rt_outside_index_of_refraction says otherwise) from its inside (back faces),
+// so a glass pane's inner face can be glass on one side and water on the other.
 // The choice is made with the Fresnel probability, so the throughput is
 // unchanged. Absorption inside the medium is applied per segment in
 // shade_and_bounce().
-void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, float index_of_refraction, uint material_index, inout PathState ps) {
-	float relative_ior = h.is_front_face ? 1.0 / index_of_refraction : index_of_refraction;
+void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, MaterialData surface_material, uint material_index, inout PathState ps) {
+	float inside_ior = rt_material_index_of_refraction(surface_material);
+	float outside_ior = surface_material.medium_absorption.w > 0.0 ? surface_material.medium_absorption.w : 1.0;
+	float relative_ior = h.is_front_face ? outside_ior / inside_ior : inside_ior / outside_ior;
 	float cos_incident = clamp(dot(N, V), 0.0, 1.0);
 	float sin_transmitted_squared = relative_ior * relative_ior * (1.0 - cos_incident * cos_incident);
 	float reflectance = 1.0;
@@ -664,9 +677,12 @@ void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, float index_of_re
 		ps.next_ray_dir = refract(-V, N, relative_ior);
 		// Start the refracted ray on the far side of the surface.
 		ps.offset_normal = -h.geometry_normal;
-		// Through a front face the ray enters this dielectric's medium; through
-		// a back face it leaves it for air.
-		ps.medium = h.is_front_face ? material_index + 1u : 0u;
+		// Through a front face the ray enters this surface's inside medium;
+		// through a back face its outside one, which is plain air unless the
+		// material describes it.
+		bool is_outside_air = surface_material.medium_absorption.w <= 0.0 && all(equal(surface_material.outside_medium_absorption.xyz, vec3(0.0)));
+		uint outside_medium = is_outside_air ? 0u : (material_index + 1u) | RT_MEDIUM_OUTSIDE_BIT;
+		ps.medium = h.is_front_face ? material_index + 1u : outside_medium;
 	}
 	ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags) & ~LAST_BOUNCE_DIFFUSE_FLAG;
 }
@@ -684,7 +700,7 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 	MaterialData entry_material = materials[entry_material_index];
 	bool is_dielectric = (entry_material.flags & RT_MAT_FLAG_DIELECTRIC) != 0u;
 	if (is_dielectric) {
-		sample_dielectric_continuation(h, N, V, rt_material_index_of_refraction(entry_material), entry_material_index, ps);
+		sample_dielectric_continuation(h, N, V, entry_material, entry_material_index, ps);
 		return true;
 	}
 
@@ -958,7 +974,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	// Beer–Lambert: the segment that ends here ran through the medium the ray
 	// was in, so the light it carries back is absorbed per colour.
 	if (ps.medium != 0u) {
-		ps.throughput *= exp(-materials[ps.medium - 1u].medium_absorption.xyz * gl_HitTEXT);
+		ps.throughput *= exp(-rt_medium_absorption(ps.medium) * gl_HitTEXT);
 	}
 
 	uint total_bounces = get_total_bounces(ps.packed_bounces_flags);
