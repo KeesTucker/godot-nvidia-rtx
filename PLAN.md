@@ -47,6 +47,15 @@ with no ray bending. seagrass-tank M4 needs:
 This goes into the renderer itself, not `drivers/streamline/`, so expect harder
 upstream merges in `servers/rendering/renderer_rd/` from here on.
 
+*Built (2026-11-11):* step 1 (e501664), and step 2's medium tracking with
+Beer–Lambert absorption (4952156). Since ab953e0, faces are two-sided: a
+custom shader declares `rt_index_of_refraction` and `rt_absorption_per_m` for
+behind its back face, and `rt_outside_index_of_refraction` (0 = air) and
+`rt_outside_absorption_per_m` for in front of it, so one face can separate
+glass from water. Still to do: Henyey–Greenstein in-scattering, absorption on
+shadow rays, steps 3 and 4. Step 3's light source is the project's LED bar,
+not a sun.
+
 ## Diffuse transmission for bounce light
 
 `BACKLIGHT` only reaches direct light: `evalCombinedBRDFSeparate` in
