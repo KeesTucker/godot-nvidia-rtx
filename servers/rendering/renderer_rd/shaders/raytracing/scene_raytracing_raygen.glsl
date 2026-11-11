@@ -148,6 +148,66 @@ void dlss_rr_replace_primary_surface(vec3 p_origin, vec3 p_dir, float p_hit_t) {
 		return;
 	}
 }
+
+// Glass, a water surface, and the mirrors and total internal reflections a ray meets through them.
+#define DLSS_RR_TRANSMISSION_MAX_SMOOTH_HITS 6u
+
+// dlss_rr_replace_through_primary_dielectric gives a primary glass or water hit the guides of the
+// surface seen through it: its depth, motion, normal, roughness and albedos. A guide ray walks from
+// the camera, refracting through dielectrics and reflecting off mirrors, to the first other surface.
+// The guides go at its apparent position, as far along the camera ray as the walk was long, with
+// its motion mapped through the mirrors. Refraction bends the walk, so camera motion through tilted
+// or rippled interfaces is close but not exact.
+void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
+	vec3 ray_origin = p_origin;
+	vec3 ray_dir = p_dir;
+	float scene_length = 0.0;
+	mat3 image_xform = mat3(1.0); // World to the image space of the mirrors along the walk.
+
+	PathState gs;
+	gs.radiance = vec3(0.0);
+	gs.throughput = vec3(0.0);
+	gs.rng_state = 0u;
+	gs.offset_normal = vec3(0.0, 0.0, 1.0);
+	gs.next_ray_dir = vec3(0.0, 0.0, 1.0);
+	gs.medium = 0u;
+	for (uint smooth_hits = 1u; smooth_hits <= DLSS_RR_TRANSMISSION_MAX_SMOOTH_HITS; smooth_hits++) {
+		// One bounce and no SAMPLE_ZERO keep the primary depth/velocity/guide writes away.
+		gs.packed_bounces_flags = inc_total_bounce(0u) | GUIDE_RAY_FLAG |
+				(smooth_hits == DLSS_RR_TRANSMISSION_MAX_SMOOTH_HITS ? GUIDE_LAST_FLAG : 0u);
+		gs.hit_t = -1.0;
+		path_pack(payload, gs);
+		traceRayEXT(tlas, RT_RAY_FLAGS, RT_VIS_MASK, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
+		if (payload.hit_t < 0.0 || (payload.packed_bounces_flags & GUIDE_RESULT_FLAG) == 0u) {
+			return;
+		}
+		PathState result = path_unpack(payload);
+		scene_length += result.hit_t;
+		if ((result.packed_bounces_flags & GUIDE_MIRROR_FLAG) != 0u) {
+			// offset_normal is on the side the walk goes on: the far side when it went through.
+			bool went_through = dot(ray_dir, result.offset_normal) > 0.0;
+			vec3 mirror_axis = ray_dir - result.next_ray_dir;
+			if (!went_through && dot(mirror_axis, mirror_axis) > 1e-10) {
+				image_xform = image_xform * dlss_rr_householder(normalize(mirror_axis));
+			}
+			ray_origin = offset_ray_origin(ray_origin + ray_dir * result.hit_t, result.offset_normal);
+			ray_dir = result.next_ray_dir;
+			continue;
+		}
+
+		ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+		vec3 apparent_pos = p_origin + p_dir * scene_length;
+		vec3 motion = vec3(unpackHalf2x16(payload.packed_rt[0]), unpackHalf2x16(payload.packed_rt[1]).x);
+		float roughness = unpackHalf2x16(payload.packed_rt[1]).y;
+		vec2 mv = rt_motion_vector(apparent_pos, apparent_pos + image_xform * motion);
+		imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
+		dlss_rr_write_specular_motion_vector(mv);
+		imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
+		imageStore(dlss_rr_normal_roughness, pixel, vec4(image_xform * result.next_ray_dir, roughness));
+		dlss_rr_write_albedo_guides(unpackUnorm4x8(payload.packed_rt[2]).rgb, unpackUnorm4x8(payload.rng_state).rgb);
+		return;
+	}
+}
 #endif // DLSS_RR_ENABLED
 
 void main() {
@@ -224,6 +284,7 @@ void main() {
 		// Primary surface replacement this sample still owes (only sample 0 starts one).
 		bool replace_pending = false;
 		float replace_hit_t = 0.0;
+		bool transmit_pending = false; // The primary hit was glass or water; walk through it after the path.
 #endif
 
 		[[dont_unroll]] for (uint bounce = 0u; bounce <= max_bounces; bounce++) {
@@ -248,6 +309,10 @@ void main() {
 
 			ps = path_unpack(payload);
 #ifdef DLSS_RR_ENABLED
+			if (bounce == 0u && (ps.packed_bounces_flags & DLSS_RR_TRANSMIT_PENDING_FLAG) != 0u) {
+				transmit_pending = true;
+				ps.packed_bounces_flags &= ~DLSS_RR_TRANSMIT_PENDING_FLAG;
+			}
 			if (bounce == 0u && (ps.packed_bounces_flags & DLSS_RR_REPLACE_PENDING_FLAG) != 0u) {
 				replace_pending = true;
 				replace_hit_t = ps.hit_t;
@@ -402,6 +467,9 @@ void main() {
 #ifdef DLSS_RR_ENABLED
 		if (replace_pending) {
 			dlss_rr_replace_primary_surface(origin.xyz, direction.xyz, replace_hit_t);
+		}
+		if (transmit_pending) {
+			dlss_rr_replace_through_primary_dielectric(origin.xyz, direction.xyz);
 		}
 #endif
 

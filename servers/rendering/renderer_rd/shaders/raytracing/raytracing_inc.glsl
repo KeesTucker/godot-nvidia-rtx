@@ -152,7 +152,7 @@ float payload_peel_scene_depth(PathPayload p) {
 }
 
 // Bounce count helpers. Bits 0-3: total, must hold RT_MAX_BOUNCES_LIMIT; bits 4-6: diffuse, must hold MAX_DIFFUSE_BOUNCES.
-// Bit 7: PEEL_SCENE_DEPTH_FLAG. Bit 8: LAST_BOUNCE_DIFFUSE_FLAG. Bits 9-13: DLSS-RR guide rays and replacement. Bit 14 is reserved.
+// Bit 7: PEEL_SCENE_DEPTH_FLAG. Bit 8: LAST_BOUNCE_DIFFUSE_FLAG. Bits 9-14: DLSS-RR guide rays and replacement.
 uint get_total_bounces(uint packed) {
 	return packed & 0xFu;
 }
@@ -184,10 +184,13 @@ const uint LAST_BOUNCE_DIFFUSE_FLAG = (1u << 8);
 const uint GUIDE_RAY_FLAG = (1u << 9);
 const uint GUIDE_LAST_FLAG = (1u << 10); //!< Raygen input: the hit must report itself, not continue.
 const uint GUIDE_RESULT_FLAG = (1u << 11); //!< Hit output: the payload holds a guide result.
-const uint GUIDE_MIRROR_FLAG = (1u << 12); //!< Hit output: replaceable mirror, continue along next_ray_dir.
+const uint GUIDE_MIRROR_FLAG = (1u << 12); //!< Hit output: replaceable mirror or dielectric, continue along next_ray_dir.
 // Set by a replaceable primary mirror; the path's next singular hit writes the replacement and clears it.
 // Still set after that bounce, raygen falls back to a guide ray walk.
 const uint DLSS_RR_REPLACE_PENDING_FLAG = (1u << 13);
+// Set by a primary dielectric hit (glass, water). Raygen then walks guide rays through it to the
+// surface seen behind it, since the surface itself shows nothing of its own.
+const uint DLSS_RR_TRANSMIT_PENDING_FLAG = (1u << 14);
 
 // Sample 0 flag (bit 24) - only write DLSS RR outputs on first sample
 const uint SAMPLE_ZERO_FLAG = (1u << 24);

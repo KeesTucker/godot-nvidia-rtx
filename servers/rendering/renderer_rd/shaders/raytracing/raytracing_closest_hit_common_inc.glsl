@@ -645,10 +645,15 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 // water on the other. The choice is made with the Fresnel probability, so the
 // throughput is unchanged. Absorption inside the medium is applied per segment
 // in shade_and_bounce().
-void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, MaterialData surface_material, inout PathState ps) {
+// dielectric_relative_ior is the ratio of the index the ray leaves to the one it enters.
+float dielectric_relative_ior(HitData h, MaterialData surface_material) {
 	float inside_ior = rt_medium_index_of_refraction(surface_material.inside_medium);
 	float outside_ior = rt_medium_index_of_refraction(surface_material.outside_medium);
-	float relative_ior = h.is_front_face ? outside_ior / inside_ior : inside_ior / outside_ior;
+	return h.is_front_face ? outside_ior / inside_ior : inside_ior / outside_ior;
+}
+
+void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, MaterialData surface_material, inout PathState ps) {
+	float relative_ior = dielectric_relative_ior(h, surface_material);
 	float cos_incident = clamp(dot(N, V), 0.0, 1.0);
 	float sin_transmitted_squared = relative_ior * relative_ior * (1.0 - cos_incident * cos_incident);
 	float reflectance = 1.0;
@@ -800,24 +805,39 @@ bool dlss_rr_is_replaceable_mirror(HitData h, MaterialResult m) {
 }
 
 // Guide ray hit, returned to raygen in the payload. Every hit: hit_t, diffuse albedo (packed_rt[2])
-// and specular albedo (rng_state) as unorm8. A replaceable mirror adds its exact reflection
-// (next_ray_dir); any other surface its world motion (packed_rt[0], packed_rt[1].x). Raygen blends
-// albedos and maps motion through the chain.
+// and specular albedo (rng_state) as unorm8. A replaceable mirror adds its exact reflection, a
+// dielectric its refraction (or reflection past the critical angle), both in next_ray_dir with
+// offset_normal on the side the walk goes on. Any other surface adds its world motion
+// (packed_rt[0], packed_rt[1].x), roughness (packed_rt[1].y) and normal (next_ray_dir). Raygen
+// blends albedos and maps motion through the chain.
 void dlss_rr_guide_hit(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV, uint p_flags) {
-	bool mirror = (p_flags & GUIDE_LAST_FLAG) == 0u && dlss_rr_is_replaceable_mirror(h, m);
+	MaterialData entry_material = materials[geometries[h.geometry_idx].material_index & RT_MATERIAL_INDEX_MASK];
+	bool can_continue = (p_flags & GUIDE_LAST_FLAG) == 0u;
+	bool is_dielectric = can_continue && (entry_material.flags & RT_MAT_FLAG_DIELECTRIC) != 0u;
+	bool mirror = can_continue && !is_dielectric && dlss_rr_is_replaceable_mirror(h, m);
+	vec3 next_ray_dir = mirror ? reflect(-V, N) : N;
+	vec3 offset_normal = h.geometry_normal;
+	if (is_dielectric) {
+		// Deterministic, unlike the path: always through, unless total internal reflection.
+		vec3 refracted = refract(-V, N, dielectric_relative_ior(h, entry_material));
+		bool is_totally_reflected = dot(refracted, refracted) < 0.5;
+		next_ray_dir = is_totally_reflected ? reflect(-V, N) : refracted;
+		offset_normal = is_totally_reflected ? h.geometry_normal : -h.geometry_normal;
+	}
+	bool continues = mirror || is_dielectric;
 	PathState gs;
 	gs.radiance = vec3(0.0);
 	gs.throughput = vec3(0.0);
-	gs.packed_bounces_flags = p_flags | GUIDE_RESULT_FLAG | (mirror ? GUIDE_MIRROR_FLAG : 0u);
+	gs.packed_bounces_flags = p_flags | GUIDE_RESULT_FLAG | (continues ? GUIDE_MIRROR_FLAG : 0u);
 	gs.rng_state = 0u;
 	gs.hit_t = gl_HitTEXT;
-	gs.offset_normal = h.geometry_normal;
-	gs.next_ray_dir = mirror ? reflect(-V, N) : N;
+	gs.offset_normal = offset_normal;
+	gs.next_ray_dir = next_ray_dir;
 	gs.medium = 0u;
 	path_pack(payload, gs);
-	vec3 motion = mirror ? vec3(0.0) : rt_hit_prev_world_pos(h.hit_pos) - h.hit_pos;
+	vec3 motion = continues ? vec3(0.0) : rt_hit_prev_world_pos(h.hit_pos) - h.hit_pos;
 	payload.packed_rt[0] = packHalf2x16(motion.xy);
-	payload.packed_rt[1] = packHalf2x16(vec2(motion.z, 0.0));
+	payload.packed_rt[1] = packHalf2x16(vec2(motion.z, m.roughness));
 	payload.packed_rt[2] = packUnorm4x8(vec4(DLSSRR_computeDiffuseAlbedo(m.albedo, m.metalness), 0.0));
 	payload.rng_state = packUnorm4x8(vec4(dlss_rr_compute_specular_albedo(m, NdotV), 0.0));
 }
@@ -1000,7 +1020,10 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			imageStore(rt_velocity_image, pixel, vec4(specular_mv, 0.0, 0.0));
 		}
 		// The path's next hit (or raygen's fallback walk) replaces these guides with the surface seen through the mirror.
-		if (dlss_rr_is_replaceable_mirror(h, m)) {
+		bool is_primary_dielectric = (rt_entry_material_flags(h.geometry_idx) & RT_MAT_FLAG_DIELECTRIC) != 0u;
+		if (is_primary_dielectric) {
+			ps.packed_bounces_flags |= DLSS_RR_TRANSMIT_PENDING_FLAG;
+		} else if (dlss_rr_is_replaceable_mirror(h, m)) {
 			ps.packed_bounces_flags |= DLSS_RR_REPLACE_PENDING_FLAG;
 		}
 	} else if (total_bounces == 1u && (ps.packed_bounces_flags & DLSS_RR_REPLACE_PENDING_FLAG) != 0u &&
