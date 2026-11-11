@@ -47,6 +47,26 @@ with no ray bending. seagrass-tank M4 needs:
 This goes into the renderer itself, not `drivers/streamline/`, so expect harder
 upstream merges in `servers/rendering/renderer_rd/` from here on.
 
+## Diffuse transmission for bounce light
+
+`BACKLIGHT` only reaches direct light: `evalCombinedBRDFSeparate` in
+`brdf_inc.glsl` adds the backlit term for NEE, but `evalIndirectCombinedBRDF`
+never samples through the surface, so bounce light (off sand, glass, other
+leaves) can't pass through a thin leaf. A dense seagrass canopy should glow
+from inside, and today it doesn't. `SSS_STRENGTH` is parsed and then ignored,
+but thin leaves don't need SSS; this is the right model for them.
+
+1. Add a diffuse transmission lobe to the indirect BRDF: with probability set
+   by the backlight's weight, sample a cosine hemisphere around −N and weight
+   the path by `backlight`. Keep the reflection and transmission choice
+   energy-conserving.
+2. Wire the same lobe for `BaseMaterial3D`'s back lighting, which is raster-only
+   today (the TODO in `scene_raytracing_raygen.glsl`).
+3. Check DLSS-RR's guide buffers stay sensible when the first bounce goes
+   through a leaf.
+
+Small and self-contained: about 1–2 hours. It fits alongside the water work.
+
 ## Later
 
 Opacity micromaps, linear swept spheres, cluster/partitioned acceleration
