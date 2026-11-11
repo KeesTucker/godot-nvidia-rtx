@@ -638,6 +638,35 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 	return lit;
 }
 
+// Smooth dielectric (water, glass): reflect with probability equal to the
+// exact Fresnel reflectance, otherwise refract; total internal reflection
+// always reflects. Front faces are where the ray enters the denser medium.
+// The choice is made with the Fresnel probability, so the throughput is
+// unchanged. Absorption inside the medium comes later (medium tracking).
+void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, float index_of_refraction, inout PathState ps) {
+	float relative_ior = h.is_front_face ? 1.0 / index_of_refraction : index_of_refraction;
+	float cos_incident = clamp(dot(N, V), 0.0, 1.0);
+	float sin_transmitted_squared = relative_ior * relative_ior * (1.0 - cos_incident * cos_incident);
+	float reflectance = 1.0;
+	float cos_transmitted = 0.0;
+	if (sin_transmitted_squared < 1.0) {
+		cos_transmitted = sqrt(1.0 - sin_transmitted_squared);
+		float s_polarised = (relative_ior * cos_incident - cos_transmitted) / (relative_ior * cos_incident + cos_transmitted);
+		float p_polarised = (cos_incident - relative_ior * cos_transmitted) / (cos_incident + relative_ior * cos_transmitted);
+		reflectance = 0.5 * (s_polarised * s_polarised + p_polarised * p_polarised);
+	}
+	bool reflects = rand(ps.rng_state) < reflectance;
+	if (reflects) {
+		ps.next_ray_dir = reflect(-V, N);
+		ps.offset_normal = h.geometry_normal;
+	} else {
+		ps.next_ray_dir = refract(-V, N, relative_ior);
+		// Start the refracted ray on the far side of the surface.
+		ps.offset_normal = -h.geometry_normal;
+	}
+	ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags) & ~LAST_BOUNCE_DIFFUSE_FLAG;
+}
+
 bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, inout PathState ps) {
 	if (surface_is_unshaded(h.geometry_idx)) {
 		return false;
@@ -646,6 +675,12 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 	uint diffuse_bounces = get_diffuse_bounces(ps.packed_bounces_flags);
 	if (total_bounces >= RT_GET_MAX_BOUNCES() || diffuse_bounces >= MAX_DIFFUSE_BOUNCES) {
 		return false;
+	}
+	MaterialData entry_material = materials[geometries[h.geometry_idx].material_index & RT_MATERIAL_INDEX_MASK];
+	bool is_dielectric = (entry_material.flags & RT_MAT_FLAG_DIELECTRIC) != 0u;
+	if (is_dielectric) {
+		sample_dielectric_continuation(h, N, V, rt_material_index_of_refraction(entry_material), ps);
+		return true;
 	}
 
 	MaterialProperties material = material_properties_from_result(h, m, N, V);

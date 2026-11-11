@@ -3280,6 +3280,13 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			rt_state.orm ? 1.0f : get_float("metallic", 0.0f), get_float("specular", 0.5f));
 	// Also weights unshaded albedo, so it is read with the emission feature disabled.
 	mat.emission_indirect = get_float("emission_indirect_energy", 1.0f);
+	// Refraction is opt-in: a shader declares `uniform float rt_index_of_refraction`
+	// (1.0-2.0). The path tracer then reflects or refracts by Fresnel at its hits.
+	const float index_of_refraction = get_float("rt_index_of_refraction", 0.0f);
+	if (index_of_refraction > 1.0f) {
+		mat.flags |= RT_MAT_FLAG_DIELECTRIC;
+		mat.surface_params.index_of_refraction = rt_unorm8(index_of_refraction - 1.0f);
+	}
 
 	// Addressing stored in fp16 slots, packed once below.
 	float uv1_blend_sharpness = 1.0f;

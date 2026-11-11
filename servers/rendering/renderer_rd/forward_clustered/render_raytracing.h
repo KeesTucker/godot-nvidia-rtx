@@ -178,7 +178,7 @@ struct alignas(16) RT_MaterialData {
 		uint32_t roughness : 8;
 		uint32_t metallic : 8;
 		uint32_t specular : 8; // Dielectric specular, default 0.5 -> F0 = 0.04.
-		uint32_t unused : 8;
+		uint32_t index_of_refraction : 8; // (IOR - 1) as unorm8, read when RT_MAT_FLAG_DIELECTRIC is set.
 	} surface_params;
 	// UV2 transform, fp16 (see rt_material_set_packed_uv()): identity unless triplanar or applied by the vertex stage.
 	struct {
@@ -438,6 +438,8 @@ enum {
 	RT_MAT_FLAG_UV2_TRIPLANAR_WORLD = 65536u,
 	// Opaque material traced as transparent only because of the instance fade; it ignores material alpha like raster.
 	RT_MAT_FLAG_INSTANCE_FADE = 131072u,
+	// Refracts: a shader opted in with `uniform float rt_index_of_refraction`.
+	RT_MAT_FLAG_DIELECTRIC = 262144u,
 	// Multi-bit fields fill the top bits so new single-bit flags can grow upward.
 	// Blend class of transparent surfaces (bits 25-27); opaque surfaces leave 0.
 	RT_MAT_BLEND_CLASS_SHIFT = 25u,

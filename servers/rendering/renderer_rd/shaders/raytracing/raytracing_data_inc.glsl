@@ -90,6 +90,7 @@ struct InstanceMotionData {
 #define RT_MAT_FLAG_UV2_TRIPLANAR 32768u
 #define RT_MAT_FLAG_UV2_TRIPLANAR_WORLD 65536u
 #define RT_MAT_FLAG_INSTANCE_FADE 131072u
+#define RT_MAT_FLAG_DIELECTRIC 262144u
 
 // Multi-bit fields fill the top bits so new single-bit flags can grow upward.
 // Blend class of transparent surfaces (bits 25-27). Opaque surfaces leave 0.
@@ -129,7 +130,7 @@ struct MaterialData {
 	vec3 uv1_scale; // UV1 scale (default 1,1,1)
 	float normal_map_depth; // Normal map strength (default 1.0)
 	vec3 uv1_offset; // UV1 offset (default 0,0,0)
-	uint surface_params; // unorm8x4: roughness, metallic, specular, unused. See rt_material_surface_params().
+	uint surface_params; // unorm8x4: roughness, metallic, specular, IOR - 1. See rt_material_surface_params().
 
 	uint uv2_scale_xy; // fp16x2. UV2 transform: identity unless triplanar or applied by the vertex stage.
 	uint flags; // See RT_MAT_FLAG_*.
@@ -172,4 +173,9 @@ float rt_entry_alpha(MaterialData p_mat, float p_alpha, float p_scissor_threshol
 // BaseMaterial3D roughness, metallic, specular (x, y, z).
 vec3 rt_material_surface_params(MaterialData p_mat) {
 	return unpackUnorm4x8(p_mat.surface_params).xyz;
+}
+
+// Index of refraction of a RT_MAT_FLAG_DIELECTRIC material.
+float rt_material_index_of_refraction(MaterialData p_mat) {
+	return 1.0 + unpackUnorm4x8(p_mat.surface_params).w;
 }
