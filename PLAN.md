@@ -71,7 +71,13 @@ with bent over unbent light, and names its lights by position in
 `rt_caustics_light_<n>_position` globals. `gather_lights` matches lights to
 those positions (within 1 mm) into `RT_LightData::caustics_layer`, and
 `lights_shadow_transmittance` multiplies in the volume at the shadow ray's
-start (binding 42), so haze single scattering gets caustic shafts too.
+start (binding 42), so haze single scattering gets caustic shafts too. Up to
+32 caustic lights.
+
+Opaque surfaces inside a medium now reflect against it, not air
+(`rt_f0_in_medium`): the material's F0 gives its index, and F0 is recomputed
+against the medium's. A leaf (n ≈ 1.45) underwater drops from about 3% to
+0.2%. The DLSS-RR specular albedo guide still uses the in-air F0.
 
 ## Diffuse transmission for bounce light
 

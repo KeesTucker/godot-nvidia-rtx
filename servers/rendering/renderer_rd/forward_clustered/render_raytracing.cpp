@@ -5408,7 +5408,7 @@ void RenderRaytracing::build_decal_volumes(RTViewportState *p_state, const Rende
 // the rt_caustics_light_<layer>_position globals, since lights have no id the path
 // tracer and the project share.
 static uint32_t _rt_light_caustics_layer(const Vector3 &p_position) {
-	static constexpr int RT_CAUSTICS_MAX_LIGHTS = 16;
+	static constexpr int RT_CAUSTICS_MAX_LIGHTS = 32;
 	static constexpr float SAME_LIGHT_DISTANCE_SQUARED = 1.0e-6f; // 1 mm.
 	static LocalVector<StringName> position_names;
 	if (position_names.is_empty()) {

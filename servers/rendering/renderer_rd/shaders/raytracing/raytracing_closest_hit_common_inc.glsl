@@ -273,6 +273,21 @@ void apply_segment_fog(float segment_dist, uint mat_flags, bool camera_segment, 
 // BRDF MATERIAL SETUP
 // ============================================================================
 
+// rt_f0_in_medium re-references an opaque surface's reflectance, which
+// materials give against air, to the medium the ray is in. Underwater, a leaf
+// (n ≈ 1.45) drops from about 3% to 0.2%, since its index is close to water's.
+float rt_f0_in_medium(float p_f0_in_air, uint p_mat_flags) {
+	bool is_dielectric = (p_mat_flags & RT_MAT_FLAG_DIELECTRIC) != 0u;
+	float medium_ior = rt_medium_index_of_refraction(payload.medium);
+	if (is_dielectric || medium_ior <= 1.0001) {
+		return p_f0_in_air;
+	}
+	float root = sqrt(clamp(p_f0_in_air, 0.0, 0.99));
+	float surface_ior = (1.0 + root) / (1.0 - root);
+	float ratio = (surface_ior - medium_ior) / (surface_ior + medium_ior);
+	return ratio * ratio;
+}
+
 // BRDF inputs for a surface. 'p_mat_flags' supplies the Godot light model and
 // 'p_NdotV' the rasterizer's DFG energy compensation.
 MaterialProperties material_properties(vec3 p_albedo, float p_metallic, float p_roughness, float p_specular,
@@ -281,7 +296,7 @@ MaterialProperties material_properties(vec3 p_albedo, float p_metallic, float p_
 	material.baseColor = p_albedo;
 	material.metalness = p_metallic;
 	material.roughness = p_roughness;
-	material.dielectricF0 = material_specular_to_f0(p_specular);
+	material.dielectricF0 = rt_f0_in_medium(material_specular_to_f0(p_specular), p_mat_flags);
 	material.emissive = vec3(0.0);
 	material.transmissivness = 0.0;
 	material.opacity = 1.0;
