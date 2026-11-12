@@ -887,6 +887,9 @@ void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, 
 }
 #endif // DLSS_RR_ENABLED
 
+// Throughput under which haze past a diffuse bounce is only traced some of the time.
+#define RT_HAZE_ROULETTE_THRESHOLD 0.5
+
 // Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
 // Also handles DLSS-RR G-buffer output on primary ray.
 void shade_and_bounce(HitData h, MaterialResult m) {
@@ -1013,8 +1016,18 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	// Haze: single scattering of the lights into this segment. Only the opaque
 	// hit adds it, so peel layers inside the segment don't count it twice.
 	bool is_in_scattering_medium = any(greaterThan(medium_scattering_per_m, vec3(0.0)));
+	// Past a diffuse bounce the haze is dim, and its shadow ray costs as much as a bright one.
+	// Russian roulette: trace it with a probability that falls with the throughput and scale
+	// the survivors back up, never past what the threshold itself would carry. The mean stays.
+	float haze_probability = 1.0;
+	if (is_in_scattering_medium && diffuse_bounces > 0u) {
+		float strongest_throughput = max(segment_start_throughput.x, max(segment_start_throughput.y, segment_start_throughput.z));
+		haze_probability = clamp(strongest_throughput / RT_HAZE_ROULETTE_THRESHOLD, 0.0, 1.0);
+		bool survives = haze_probability >= 1.0 || rand(ps.rng_state) < haze_probability;
+		is_in_scattering_medium = survives;
+	}
 	if (is_in_scattering_medium) {
-		ps.radiance += segment_start_throughput * lights_evaluate_in_scattering(gl_WorldRayOriginEXT, gl_WorldRayDirectionEXT, gl_HitTEXT,
+		ps.radiance += segment_start_throughput / haze_probability * lights_evaluate_in_scattering(gl_WorldRayOriginEXT, gl_WorldRayDirectionEXT, gl_HitTEXT,
 				medium_extinction_per_m, medium_scattering_per_m, rt_medium_scattering_anisotropy(ps.medium),
 				uint(get_rt_param(RT_PARAM_LIGHT_COUNT)), diffuse_bounces > 0u, ps.rng_state);
 	}
@@ -1040,6 +1053,22 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			ps.packed_bounces_flags |= DLSS_RR_TRANSMIT_PENDING_FLAG;
 		} else if (dlss_rr_is_replaceable_mirror(h, m)) {
 			ps.packed_bounces_flags |= DLSS_RR_REPLACE_PENDING_FLAG;
+		}
+	} else if ((ps.packed_bounces_flags & DLSS_RR_TRANSMIT_PENDING_FLAG) != 0u && is_sample_zero(ps.packed_bounces_flags)) {
+		// The path came straight through the primary glass or water. The first surface behind it
+		// that isn't another dielectric or a mirror gives the pixel its guides, as raygen's walk
+		// would. Raygen knows the camera ray, so it finishes the job: the world motion waits for
+		// it in the velocity and depth images (see dlss_rr_finish_transmitted_guides()).
+		bool is_dielectric = (rt_entry_material_flags(h.geometry_idx) & RT_MAT_FLAG_DIELECTRIC) != 0u;
+		bool shows_itself = !is_dielectric && !dlss_rr_is_replaceable_mirror(h, m);
+		if (shows_itself) {
+			ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+			vec3 motion = rt_hit_prev_world_pos(h.hit_pos) - h.hit_pos;
+			dlss_rr_store_albedo_guides(m, NdotV);
+			imageStore(dlss_rr_normal_roughness, pixel, vec4(N, m.roughness));
+			imageStore(rt_velocity_image, pixel, vec4(motion.xy, 0.0, 0.0));
+			imageStore(rt_depth_image, pixel, vec4(motion.z));
+			ps.packed_bounces_flags &= ~DLSS_RR_TRANSMIT_PENDING_FLAG;
 		}
 	} else if (total_bounces == 1u && (ps.packed_bounces_flags & DLSS_RR_REPLACE_PENDING_FLAG) != 0u &&
 			is_sample_zero(ps.packed_bounces_flags) && is_singular_path(ps.packed_bounces_flags) &&

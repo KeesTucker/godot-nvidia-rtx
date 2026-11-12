@@ -182,8 +182,10 @@ const uint GUIDE_MIRROR_FLAG = (1u << 12); //!< Hit output: replaceable mirror o
 // Set by a replaceable primary mirror; the path's next singular hit writes the replacement and clears it.
 // Still set after that bounce, raygen falls back to a guide ray walk.
 const uint DLSS_RR_REPLACE_PENDING_FLAG = (1u << 13);
-// Set by a primary dielectric hit (glass, water). Raygen then walks guide rays through it to the
-// surface seen behind it, since the surface itself shows nothing of its own.
+// Set by a primary dielectric hit (glass, water), which shows nothing of its own. Raygen keeps it
+// set while the path goes straight through dielectrics; the first other surface the path hits
+// writes its guides and clears it (see dlss_rr_finish_transmitted_guides()). If the path
+// reflects on the way instead, raygen walks guide rays through to the surface behind.
 const uint DLSS_RR_TRANSMIT_PENDING_FLAG = (1u << 14);
 
 // Sample 0 flag (bit 24) - only write DLSS RR outputs on first sample

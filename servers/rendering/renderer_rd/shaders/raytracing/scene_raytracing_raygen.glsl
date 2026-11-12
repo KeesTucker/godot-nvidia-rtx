@@ -208,6 +208,21 @@ void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
 		return;
 	}
 }
+
+// dlss_rr_finish_transmitted_guides finishes the guides of a surface the path itself reached
+// straight through the primary glass or water, which saves the walk above. The hit wrote its
+// albedos, normal and roughness, and left its world motion in the velocity (xy) and depth (z)
+// images. Those become the motion vector and depth of its apparent position: as far along the
+// camera ray as the path was long.
+void dlss_rr_finish_transmitted_guides(vec3 p_origin, vec3 p_dir, float p_scene_length) {
+	ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+	vec3 motion = vec3(imageLoad(rt_velocity_image, pixel).xy, imageLoad(rt_depth_image, pixel).x);
+	vec3 apparent_pos = p_origin + p_dir * p_scene_length;
+	vec2 mv = rt_motion_vector(apparent_pos, apparent_pos + motion);
+	imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
+	dlss_rr_write_specular_motion_vector(mv);
+	imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
+}
 #endif // DLSS_RR_ENABLED
 
 void main() {
@@ -284,7 +299,14 @@ void main() {
 		// Primary surface replacement this sample still owes (only sample 0 starts one).
 		bool replace_pending = false;
 		float replace_hit_t = 0.0;
-		bool transmit_pending = false; // The primary hit was glass or water; walk through it after the path.
+		// The primary hit was glass or water, and the surface behind it still owes the pixel its guides.
+		bool transmit_pending = false;
+		// The path has gone straight through every dielectric so far, so its next hit can write them.
+		bool transmit_through = false;
+		// How far the path has come through them. Keep this state small: everything alive across
+		// a trace is saved and restored around it, and resuming the walk from here instead of
+		// the camera (two more vec3s) cost more than the rays it saved.
+		float transmit_scene_length = 0.0;
 #endif
 
 		[[dont_unroll]] for (uint bounce = 0u; bounce <= max_bounces; bounce++) {
@@ -309,8 +331,31 @@ void main() {
 
 			ps = path_unpack(payload);
 #ifdef DLSS_RR_ENABLED
-			if (bounce == 0u && (ps.packed_bounces_flags & DLSS_RR_TRANSMIT_PENDING_FLAG) != 0u) {
+			bool transmit_flag_left = (ps.packed_bounces_flags & DLSS_RR_TRANSMIT_PENDING_FLAG) != 0u;
+			if (bounce == 0u && transmit_flag_left) {
 				transmit_pending = true;
+				transmit_through = true;
+			} else if (transmit_through && !transmit_flag_left) {
+				// The hit wrote its guides and cleared the flag.
+				dlss_rr_finish_transmitted_guides(origin.xyz, direction.xyz, transmit_scene_length + ps.hit_t);
+				transmit_pending = false;
+				transmit_through = false;
+			}
+			if (transmit_through) {
+				if (ps.hit_t < 0.0) {
+					// Sky behind the glass. The walk would miss too and leave the guides as they are.
+					transmit_pending = false;
+					transmit_through = false;
+				} else {
+					// The hit left the flag, so it was a dielectric or a mirror. offset_normal is on
+					// the side the path goes on: the far side when it went through. A reflection
+					// or the bounce limit leaves the guides to the walk.
+					transmit_scene_length += ps.hit_t;
+					bool went_through = dot(ray_dir, ps.offset_normal) > 0.0;
+					transmit_through = went_through && !is_path_terminated(ps.packed_bounces_flags);
+				}
+			}
+			if (!transmit_through) {
 				ps.packed_bounces_flags &= ~DLSS_RR_TRANSMIT_PENDING_FLAG;
 			}
 			if (bounce == 0u && (ps.packed_bounces_flags & DLSS_RR_REPLACE_PENDING_FLAG) != 0u) {
@@ -447,6 +492,10 @@ void main() {
 						replace_pending = false;
 						ps.packed_bounces_flags &= ~DLSS_RR_REPLACE_PENDING_FLAG;
 					}
+					// A transparent layer may have taken the path over, so its next hit can't
+					// speak for the pixel. Whichever continuation won carries no flag.
+					transmit_through = false;
+					ps.packed_bounces_flags &= ~DLSS_RR_TRANSMIT_PENDING_FLAG;
 #endif
 				}
 #ifdef RT_DEBUG_ENABLED
