@@ -887,6 +887,7 @@ void main() {
 	bool has_subsurface_colour = any(greaterThan(transmittance_color.rgb, vec3(0.0)));
 	m.subsurface_colour = has_subsurface_colour ? clamp(transmittance_color.rgb, vec3(0.0), vec3(1.0)) : vec3(1.0);
 	m.subsurface_mean_free_path_m = transmittance_depth > 0.0 ? transmittance_depth : RT_SUBSURFACE_DEFAULT_MEAN_FREE_PATH_M;
+	m.fluorescence = max(fluorescence, vec3(0.0));
 	// view space -> world space
 	mat3 view_to_world = mat3(inv_view_matrix);
 	m.normal = normalize(view_to_world * normal);
@@ -968,6 +969,7 @@ void main() {
 	m.subsurface = 0.0;
 	m.subsurface_colour = vec3(1.0);
 	m.subsurface_mean_free_path_m = RT_SUBSURFACE_DEFAULT_MEAN_FREE_PATH_M;
+	m.fluorescence = vec3(0.0);
 
 	// Proximity/distance fade (BaseMaterial3D feature, mirrors raster).
 	if ((mat.flags & (RT_MAT_FLAG_PROXIMITY_FADE | RT_MAT_FLAG_DISTANCE_FADE)) != 0u) {

@@ -19,6 +19,7 @@ struct MaterialResult {
 	float subsurface; // SSS_STRENGTH: share of the diffuse light that scatters under the surface before it leaves.
 	vec3 subsurface_colour; // SSS_TRANSMITTANCE_COLOR: what's under the surface. Light keeps this much at each scattering.
 	float subsurface_mean_free_path_m; // SSS_TRANSMITTANCE_DEPTH: how far light goes between scatterings.
+	vec3 fluorescence; // FLUORESCENCE: the colour given off for each unit of shorter-wavelength light soaked up.
 };
 
 // Used when a shader writes SSS_STRENGTH but no SSS_TRANSMITTANCE_DEPTH.
@@ -41,6 +42,7 @@ MaterialResult default_material_result(vec3 geometry_normal) {
 	r.subsurface = 0.0;
 	r.subsurface_colour = vec3(1.0);
 	r.subsurface_mean_free_path_m = RT_SUBSURFACE_DEFAULT_MEAN_FREE_PATH_M;
+	r.fluorescence = vec3(0.0);
 	return r;
 }
 

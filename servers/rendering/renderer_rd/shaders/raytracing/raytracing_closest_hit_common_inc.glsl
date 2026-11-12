@@ -308,6 +308,7 @@ MaterialProperties material_properties(vec3 p_albedo, float p_metallic, float p_
 	material.clearcoatRoughness = 0.0;
 	material.clearcoatF0 = 0.0;
 	material.subsurface = 0.0;
+	material.fluorescence = vec3(0.0);
 	material.diffuseMode = (p_mat_flags >> RT_MAT_DIFFUSE_MODE_SHIFT) & RT_MAT_SHADING_MODE_MASK;
 	material.specularMode = (p_mat_flags >> RT_MAT_SPECULAR_MODE_SHIFT) & RT_MAT_SHADING_MODE_MASK;
 	return material;
@@ -332,6 +333,7 @@ MaterialProperties material_properties_from_result(HitData h, MaterialResult m, 
 	material.clearcoatRoughness = m.clearcoat_roughness;
 	material.clearcoatF0 = rt_clearcoat_f0(h.geometry_idx);
 	material.subsurface = m.subsurface;
+	material.fluorescence = m.fluorescence;
 	return material;
 }
 
@@ -769,6 +771,7 @@ MaterialProperties subsurface_exit_material(MaterialProperties p_entry_material,
 	material.backlight = vec3(0.0);
 	material.clearcoat = 0.0;
 	material.subsurface = 0.0;
+	material.fluorescence = vec3(0.0);
 	material.diffuseMode = GODOT_DIFFUSE_LAMBERT;
 	material.specularMode = GODOT_SPECULAR_DISABLED;
 	return material;

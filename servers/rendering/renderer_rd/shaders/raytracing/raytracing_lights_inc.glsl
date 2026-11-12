@@ -486,7 +486,8 @@ vec3 lights_evaluate_positional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V,
 	float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
 	// NdotL is already included in brdf_value.
-	return brdf_value * light.emission * projector_color * shadow_transmittance * atten * indirect_mul;
+	vec3 arriving_light = light.emission * projector_color * shadow_transmittance * atten * indirect_mul;
+	return brdf_value * arriving_light + evalFluorescenceNdotL(N, L, material, arriving_light);
 }
 
 // Unweighted contribution of one directional light, one shadow ray.
@@ -510,7 +511,8 @@ vec3 lights_evaluate_directional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V
 
 	float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
-	return brdf_value * light.emission * shadow_transmittance * indirect_mul;
+	vec3 arriving_light = light.emission * shadow_transmittance * indirect_mul;
+	return brdf_value * arriving_light + evalFluorescenceNdotL(N, L, material, arriving_light);
 }
 
 // NEE with one shadow ray to a single light selected among all lights.

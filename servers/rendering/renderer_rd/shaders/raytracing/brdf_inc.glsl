@@ -295,6 +295,7 @@ struct MaterialProperties {
 	float clearcoatRoughness;
 	float clearcoatF0; // The coat's reflectance against the medium the surface is in.
 	float subsurface; // SSS_STRENGTH; share of the diffuse light that leaves the surface somewhere else.
+	float3 fluorescence; // FLUORESCENCE; see evalFluorescenceNdotL.
 	uint diffuseMode; // GODOT_DIFFUSE_*
 	uint specularMode; // GODOT_SPECULAR_*
 };
@@ -1135,6 +1136,21 @@ float evalClearcoatNdotL(BrdfData data, MaterialProperties material) {
 	float coatReflectance = clearcoatReflectance(material, data.LdotH);
 	data.F = float3(coatReflectance, coatReflectance, coatReflectance);
 	return evalMicrofacet(data).x;
+}
+
+// -------------------------------------------------------------------------
+//    Fluorescence
+// -------------------------------------------------------------------------
+
+// Fluorescence: a pigment soaks up light and gives it back at a longer
+// wavelength, evenly in every direction. So red comes from the green and blue
+// light arriving, and green from the blue. Nothing gives blue: RGB can't tell
+// ultraviolet from blue. Returns the light given off, not a BRDF, because one
+// colour of light turns into another. Direct light only: a path's throughput
+// is one number per colour and can't carry the crossing.
+float3 evalFluorescenceNdotL(float3 N, float3 L, MaterialProperties material, float3 arrivingLight) {
+	float3 exciting = float3(0.5f * (arrivingLight.g + arrivingLight.b), arrivingLight.b, 0.0f);
+	return material.fluorescence * exciting * (max(dot(N, L), 0.0f) * ONE_OVER_PI);
 }
 
 // Entry point for direct light: diffuse (including backlight) and specular, both times NdotL.

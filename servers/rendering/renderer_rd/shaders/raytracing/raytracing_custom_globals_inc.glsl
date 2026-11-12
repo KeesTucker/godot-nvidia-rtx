@@ -58,6 +58,7 @@ float metallic = 0.0;
 float specular = 0.5;
 vec3 emission = vec3(0.0);
 float emission_indirect = 1.0;
+vec3 fluorescence = vec3(0.0);
 vec3 normal_map = vec3(0.5, 0.5, 1.0);
 float normal_map_depth = 1.0;
 float ao = 1.0;

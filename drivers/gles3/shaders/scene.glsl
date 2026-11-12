@@ -2219,6 +2219,7 @@ void main() {
 	float specular = 0.5;
 	vec3 emission = vec3(0.0);
 	float emission_indirect = 1.0; // Written by EMISSION_INDIRECT; no indirect emission here.
+	vec3 fluorescence = vec3(0.0); // Written by FLUORESCENCE; only the path tracer fluoresces.
 	float roughness = 1.0;
 	float rim = 0.0;
 	float rim_tint = 0.0;
