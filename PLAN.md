@@ -65,8 +65,13 @@ depth; multiple scattering is left out, which is fine for thin haze. Costs
 about 0.9 ms in seagrass-tank. Step 4 is in: a primary dielectric hit sends
 a guide ray through the glass and water to the surface behind, whose depth,
 motion, normal, roughness and albedos replace the dielectric's guides at its
-apparent position. Still to do: step 3. Its light source is the project's
-LED bar, not a sun.
+apparent position. Step 3 is in, the project doing the optics: it fills a
+3D `rt_caustics_volume` global (each caustic light's slices stacked in z)
+with bent over unbent light, and names its lights by position in
+`rt_caustics_light_<n>_position` globals. `gather_lights` matches lights to
+those positions (within 1 mm) into `RT_LightData::caustics_layer`, and
+`lights_shadow_transmittance` multiplies in the volume at the shadow ray's
+start (binding 42), so haze single scattering gets caustic shafts too.
 
 ## Diffuse transmission for bounce light
 

@@ -394,7 +394,9 @@ struct alignas(16) RT_LightData {
 		uint32_t index : RT_MaterialData::TEXTURE_INDEX_BITS; // Bindless sRGB projector (omni/spot), RT_LIGHT_NO_PROJECTOR when unset.
 		uint32_t unused : 8;
 	} projector_texture;
-	uint32_t reserved[3]; // Free for future fields, keeps the 64-byte stride.
+	// caustics_layer is 1 + the light's layer in the rt_caustics_volume global, or 0 when it has none.
+	uint32_t caustics_layer;
+	uint32_t reserved[2]; // Free for future fields, keeps the 64-byte stride.
 };
 static_assert(sizeof(RT_LightData) == 64, "RT_LightData must be 64 bytes for std430, with every bitfield struct in one uint");
 

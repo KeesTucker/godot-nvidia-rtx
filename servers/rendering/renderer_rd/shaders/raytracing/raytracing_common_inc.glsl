@@ -62,6 +62,9 @@ layout(set = 0, binding = 6, std140) uniform RaytracingParams {
 	// rt_medium_<id>_index_of_refraction, _absorption_per_m, _scattering_per_m
 	// and _scattering_anisotropy globals, -1 where undefined. Medium 0 is air.
 	ivec4 rt_media[RT_MEDIA_COUNT];
+	// rt_caustics: global_shader_uniforms slots of rt_caustics_volume_min_m,
+	// rt_caustics_volume_max_m and rt_caustics_slices_per_light, -1 where undefined.
+	ivec4 rt_caustics;
 };
 
 // rt_medium_global reads a medium property's live global value, or p_default

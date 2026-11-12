@@ -5403,6 +5403,34 @@ void RenderRaytracing::build_decal_volumes(RTViewportState *p_state, const Rende
 // Light gathering
 // ---------------------------------------------------------------------------
 
+// _rt_light_caustics_layer returns 1 + the layer of rt_caustics_volume that belongs to
+// the light at p_position, or 0. A project names its caustic lights by position in
+// the rt_caustics_light_<layer>_position globals, since lights have no id the path
+// tracer and the project share.
+static uint32_t _rt_light_caustics_layer(const Vector3 &p_position) {
+	static constexpr int RT_CAUSTICS_MAX_LIGHTS = 16;
+	static constexpr float SAME_LIGHT_DISTANCE_SQUARED = 1.0e-6f; // 1 mm.
+	static LocalVector<StringName> position_names;
+	if (position_names.is_empty()) {
+		for (int layer = 0; layer < RT_CAUSTICS_MAX_LIGHTS; layer++) {
+			position_names.push_back(StringName(vformat("rt_caustics_light_%d_position", layer)));
+		}
+	}
+	const RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	const Span<const float> values = material_storage->global_shader_uniforms_get_values();
+	for (int layer = 0; layer < RT_CAUSTICS_MAX_LIGHTS; layer++) {
+		const int32_t slot = material_storage->global_shader_uniform_get_buffer_index(position_names[layer]);
+		if (slot < 0 || uint64_t(slot) * 4 + 3 > values.size()) {
+			continue;
+		}
+		const Vector3 layer_position(values[slot * 4], values[slot * 4 + 1], values[slot * 4 + 2]);
+		if (layer_position.distance_squared_to(p_position) < SAME_LIGHT_DISTANCE_SQUARED) {
+			return uint32_t(layer + 1);
+		}
+	}
+	return 0;
+}
+
 uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, const RTViewportState *p_state, RT_LightData *r_light_data, uint32_t p_max_lights) {
 	uint32_t rt_light_count = 0;
 
@@ -5565,6 +5593,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, cons
 			ld.spot.inv_attenuation = rt_half(1.0f / MAX(0.001f, ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ATTENUATION)));
 		}
 		ld.projector_texture.index = _light_projector_texture(base);
+		ld.caustics_layer = _rt_light_caustics_layer(xform.origin);
 		rt_light_count++;
 	}
 
@@ -5718,7 +5747,15 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 			float prev_vp_unjittered[16];
 			float curr_vp_unjittered[16];
 			int32_t media[SceneShaderRaytracing::RT_MEDIA_COUNT][4]; // GLSL rt_media.
+			int32_t caustics[4]; // GLSL rt_caustics.
 		} rt_ubo = {};
+		{
+			RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+			rt_ubo.caustics[0] = material_storage->global_shader_uniform_get_buffer_index(SNAME("rt_caustics_volume_min_m"));
+			rt_ubo.caustics[1] = material_storage->global_shader_uniform_get_buffer_index(SNAME("rt_caustics_volume_max_m"));
+			rt_ubo.caustics[2] = material_storage->global_shader_uniform_get_buffer_index(SNAME("rt_caustics_slices_per_light"));
+			rt_ubo.caustics[3] = -1;
+		}
 
 		// Each medium's global shader parameter slots, looked up by name every
 		// frame so media added or removed at runtime are picked up. Medium 0 is air.
@@ -6007,6 +6044,22 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		u.binding = 41;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 		u.append_id(owner->volumetric_fog_noise_get_texture());
+		uniforms.push_back(u);
+	}
+
+	// Binding 42: the project's caustics volume (the rt_caustics_volume global), white when unset.
+	{
+		RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+		const RID caustics_texture = RendererRD::MaterialStorage::get_singleton()->global_shader_uniform_get_texture(SNAME("rt_caustics_volume"));
+		RID caustics_rd_texture = caustics_texture.is_valid() ? texture_storage->texture_get_rd_texture(caustics_texture) : RID();
+		const bool is_3d_texture = caustics_rd_texture.is_valid() && RD::get_singleton()->texture_get_format(caustics_rd_texture).texture_type == RD::TEXTURE_TYPE_3D;
+		if (!is_3d_texture) {
+			caustics_rd_texture = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE);
+		}
+		RD::Uniform u;
+		u.binding = 42;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(caustics_rd_texture);
 		uniforms.push_back(u);
 	}
 

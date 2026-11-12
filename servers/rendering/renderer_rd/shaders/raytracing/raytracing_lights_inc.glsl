@@ -34,8 +34,8 @@ struct RTLightPacked {
 	uint orientation_xy; // snorm16 quaternion x, y.
 	uint orientation_zw; // snorm16 quaternion z, w.
 	uint projector_texture; // index : 24, unused : 8.
-	uint reserved0; // Free for future fields, keeps the 64-byte stride.
-	uint reserved1;
+	uint caustics_layer; // 1 + layer in rt_caustics_volume, 0 = none.
+	uint reserved1; // Free for future fields, keeps the 64-byte stride.
 	uint reserved2;
 };
 
@@ -54,6 +54,7 @@ struct RTLightData {
 	float inv_spot_attenuation; // Spot cone softness.
 	uint light_masks; // Bits 0-19: light_cull_mask (lighting test). Bits 24-31: TLAS shadow-ray mask.
 	uint projector_texture; // Bindless sRGB index, RT_LIGHT_NO_PROJECTOR when unset.
+	uint caustics_layer; // 1 + layer in rt_caustics_volume, 0 = none.
 	vec4 orientation; // Unit rotation quaternion (omni/spot); the spot cone points along local -Z.
 };
 
@@ -93,6 +94,7 @@ RTLightData lights_get(uint idx) {
 	light.inv_spot_attenuation = spot.y;
 	light.light_masks = p.masks;
 	light.projector_texture = bitfieldExtract(p.projector_texture, 0, 24);
+	light.caustics_layer = p.caustics_layer;
 	vec4 q = vec4(unpackSnorm2x16(p.orientation_xy), unpackSnorm2x16(p.orientation_zw));
 	light.orientation = q * inversesqrt(max(dot(q, q), 1e-8));
 	return light;
@@ -243,6 +245,36 @@ vec3 lights_projector_color(RTLightData light, vec3 p_dir) {
 #include "raytracing_shadow_query_inc.glsl"
 
 // ============================================================================
+// Caustics
+// ============================================================================
+
+// rt_caustics_volume holds, per caustic light, how much a refracting surface
+// focuses that light at each point under it, relative to a flat surface (1 = no
+// caustic). Texels run along world x, then world z, then each light's
+// rt_caustics_slices_per_light slices up world y, the lights stacked one after
+// another. Shadow rays cross the surface unbent, so this puts the bent light back.
+layout(set = 0, binding = 42) uniform texture3D rt_caustics_volume;
+
+float lights_caustics_at(RTLightData light, vec3 p_position) {
+	if (light.caustics_layer == 0u || rt_caustics.x < 0 || rt_caustics.y < 0 || rt_caustics.z < 0) {
+		return 1.0;
+	}
+	vec3 volume_min = global_shader_uniforms.data[rt_caustics.x].xyz;
+	vec3 volume_max = global_shader_uniforms.data[rt_caustics.y].xyz;
+	vec3 local = (p_position - volume_min) / max(volume_max - volume_min, vec3(1e-6));
+	bool is_outside_volume = any(lessThan(local, vec3(0.0))) || any(greaterThan(local, vec3(1.0)));
+	if (is_outside_volume) {
+		return 1.0;
+	}
+	float slices_per_light = max(global_shader_uniforms.data[rt_caustics.z].x, 1.0);
+	float total_slices = float(textureSize(sampler3D(rt_caustics_volume, SAMPLER_LINEAR_CLAMP), 0).z);
+	// Clamped half a slice in, so filtering never reaches the next light's layer.
+	float slice = clamp(local.y * slices_per_light, 0.5, slices_per_light - 0.5);
+	float w = (float(light.caustics_layer - 1u) * slices_per_light + slice) / total_slices;
+	return textureLod(sampler3D(rt_caustics_volume, SAMPLER_LINEAR_CLAMP), vec3(local.x, local.z, w), 0.0).r;
+}
+
+// ============================================================================
 // Shadow Ray (traceRayEXT pipeline)
 // ============================================================================
 
@@ -320,11 +352,12 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 // Shadow transmittance from origin towards the light, blended towards 1 by the light's shadow opacity.
 // Skips the trace when the path tracer draws no shadow for this light. p_receiver_shadow_mask filters the light's caster groups.
 vec3 lights_shadow_transmittance(RTLightData light, vec3 origin, vec3 direction, float max_dist, uint p_receiver_shadow_mask, inout uint rng_state) {
+	float caustics = lights_caustics_at(light, origin);
 	if (light.shadow_opacity <= 0.001) {
-		return vec3(1.0);
+		return vec3(caustics);
 	}
 	vec3 traced = lights_trace_shadow_ray(origin, direction, max_dist, (light.light_masks >> 24u) & p_receiver_shadow_mask, rng_state);
-	return mix(vec3(1.0), traced, light.shadow_opacity);
+	return mix(vec3(1.0), traced, light.shadow_opacity) * caustics;
 }
 
 // ============================================================================
