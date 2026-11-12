@@ -65,7 +65,12 @@ depth; multiple scattering is left out, which is fine for thin haze. Costs
 about 0.9 ms in seagrass-tank. Step 4 is in: a primary dielectric hit sends
 a guide ray through the glass and water to the surface behind, whose depth,
 motion, normal, roughness and albedos replace the dielectric's guides at its
-apparent position. Step 3 is in, the project doing the optics: it fills a
+apparent position. Since 8165ce8 the path's own hit writes those guides when
+it went straight through, and the guide ray only walks where the path
+reflected or ran out of bounces; haze past a diffuse bounce is traced by
+Russian roulette. Keep raygen's state across traces small: resuming the walk
+from where the path stopped (two more vec3s alive) was slower than
+retracing. Step 3 is in, the project doing the optics: it fills a
 3D `rt_caustics_volume` global (each caustic light's slices stacked in z)
 with bent over unbent light, and names its lights by position in
 `rt_caustics_light_<n>_position` globals. `gather_lights` matches lights to
