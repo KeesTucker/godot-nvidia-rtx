@@ -217,7 +217,9 @@ struct alignas(16) RT_MaterialData {
 	// behind its back faces (rt_medium) and in front of its front faces (rt_outside_medium, 0 = air).
 	uint32_t inside_medium;
 	uint32_t outside_medium;
-	uint32_t medium_padding[2];
+	// The clear coat's index of refraction (`uniform float rt_clearcoat_index_of_refraction`).
+	float clearcoat_index_of_refraction;
+	uint32_t medium_padding;
 };
 static_assert(sizeof(RT_MaterialData) == 144, "RT_MaterialData must be 144 bytes for std430, with every bitfield struct in one uint");
 static_assert(BindlessBlock::MAX_BINDLESS_TEXTURES <= (1u << RT_MaterialData::TEXTURE_INDEX_BITS), "Bindless texture indices must fit RT_MaterialData textures");

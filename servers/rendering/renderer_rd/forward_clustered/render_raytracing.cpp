@@ -3295,6 +3295,10 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	if (mat.inside_medium != 0u) {
 		mat.flags |= RT_MAT_FLAG_DIELECTRIC;
 	}
+	// The rasterizer's clear coat is fixed at 1.5, a varnish. A shader declares
+	// `uniform float rt_clearcoat_index_of_refraction` for anything else, like
+	// the mucus on a fish (about 1.35).
+	mat.clearcoat_index_of_refraction = get_float("rt_clearcoat_index_of_refraction", 1.5f);
 
 	// Addressing stored in fp16 slots, packed once below.
 	float uv1_blend_sharpness = 1.0f;
@@ -5754,7 +5758,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 			rt_ubo.caustics[0] = material_storage->global_shader_uniform_get_buffer_index(SNAME("rt_caustics_volume_min_m"));
 			rt_ubo.caustics[1] = material_storage->global_shader_uniform_get_buffer_index(SNAME("rt_caustics_volume_max_m"));
 			rt_ubo.caustics[2] = material_storage->global_shader_uniform_get_buffer_index(SNAME("rt_caustics_slices_per_light"));
-			rt_ubo.caustics[3] = -1;
+			// Not caustics: the medium the camera is in rides in the spare slot.
+			rt_ubo.caustics[3] = material_storage->global_shader_uniform_get_buffer_index(SNAME("rt_camera_medium"));
 		}
 
 		// Each medium's global shader parameter slots, looked up by name every

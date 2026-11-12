@@ -291,7 +291,9 @@ void main() {
 		ps.hit_t = -1.0;
 		ps.offset_normal = vec3(0.0, 0.0, 1.0);
 		ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
-		ps.medium = 0u; // The camera is in air.
+		// The camera is in air unless the project says otherwise (rt_camera_medium).
+		ps.medium = uint(clamp(rt_medium_global(rt_caustics.w, vec4(0.0)).x, 0.0, float(RT_MEDIA_COUNT - 1)) + 0.5);
+		ps.exit_shift_m = 0.0;
 
 		vec3 ray_origin = origin.xyz;
 		vec3 ray_dir = direction.xyz;
@@ -510,7 +512,9 @@ void main() {
 			}
 			// Reconstruct the next ray origin from the current ray + hit distance, apply bias
 			vec3 hit_pos = ray_origin + ray_dir * ps.hit_t;
-			ray_origin = offset_ray_origin(hit_pos, ps.offset_normal);
+			// Light that scattered under the surface leaves from where it came back out.
+			bool left_somewhere_else = ps.exit_shift_m > 0.0;
+			ray_origin = left_somewhere_else ? hit_pos + ps.offset_normal * ps.exit_shift_m : offset_ray_origin(hit_pos, ps.offset_normal);
 			ray_dir = ps.next_ray_dir;
 		}
 #ifdef DLSS_RR_ENABLED
@@ -876,6 +880,13 @@ void main() {
 	m.emissive = emission * scene_data_block.data.emissive_exposure_normalization;
 	m.emission_indirect = emission_indirect;
 	m.backlight = backlight;
+	m.clearcoat = clamp(clearcoat, 0.0, 1.0);
+	m.clearcoat_roughness = clearcoat_roughness;
+	m.subsurface = clamp(sss_strength, 0.0, 1.0);
+	// A shader that only writes SSS_STRENGTH gets a white medium, which spreads light and leaves its colour alone.
+	bool has_subsurface_colour = any(greaterThan(transmittance_color.rgb, vec3(0.0)));
+	m.subsurface_colour = has_subsurface_colour ? clamp(transmittance_color.rgb, vec3(0.0), vec3(1.0)) : vec3(1.0);
+	m.subsurface_mean_free_path_m = transmittance_depth > 0.0 ? transmittance_depth : RT_SUBSURFACE_DEFAULT_MEAN_FREE_PATH_M;
 	// view space -> world space
 	mat3 view_to_world = mat3(inv_view_matrix);
 	m.normal = normalize(view_to_world * normal);
@@ -951,6 +962,12 @@ void main() {
 	m.emission_indirect = mat.emission_indirect;
 	m.normal = final_normal;
 	m.backlight = vec3(0.0); // TODO: wire up BaseMaterial3D's "Back Lighting" for RT (raster-only today).
+	// TODO: BaseMaterial3D's clearcoat and subsurface scattering. Only custom shaders have them so far.
+	m.clearcoat = 0.0;
+	m.clearcoat_roughness = 0.0;
+	m.subsurface = 0.0;
+	m.subsurface_colour = vec3(1.0);
+	m.subsurface_mean_free_path_m = RT_SUBSURFACE_DEFAULT_MEAN_FREE_PATH_M;
 
 	// Proximity/distance fade (BaseMaterial3D feature, mirrors raster).
 	if ((mat.flags & (RT_MAT_FLAG_PROXIMITY_FADE | RT_MAT_FLAG_DISTANCE_FADE)) != 0u) {

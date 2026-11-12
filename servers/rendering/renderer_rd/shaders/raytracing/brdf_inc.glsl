@@ -291,6 +291,10 @@ struct MaterialProperties {
 
 	float3 energyCompensation; // Godot's DFG multiscatter compensation: 1 + F0 * (1 / dfg.y - 1).
 	float3 backlight; // BACKLIGHT; light leaking through from behind the surface.
+	float clearcoat; // CLEARCOAT; strength of the clear layer over everything else.
+	float clearcoatRoughness;
+	float clearcoatF0; // The coat's reflectance against the medium the surface is in.
+	float subsurface; // SSS_STRENGTH; share of the diffuse light that leaves the surface somewhere else.
 	uint diffuseMode; // GODOT_DIFFUSE_*
 	uint specularMode; // GODOT_SPECULAR_*
 };
@@ -1104,15 +1108,52 @@ BrdfData prepareBRDFData(float3 N, float3 L, float3 V, MaterialProperties materi
 	return data;
 }
 
+// -------------------------------------------------------------------------
+//    Clear coat
+// -------------------------------------------------------------------------
+
+// The share of light the clear coat reflects at this angle. The layers under
+// it get the rest.
+float clearcoatReflectance(MaterialProperties material, float cosTheta) {
+	float3 f0 = float3(material.clearcoatF0, material.clearcoatF0, material.clearcoatF0);
+	return material.clearcoat * evalFresnel(f0, godotF90(f0, 0.0f), cosTheta).x;
+}
+
+// A perfectly smooth coat would show no highlight from a point light.
+float clearcoatAlpha(MaterialProperties material) {
+	float roughness = clamp(material.clearcoatRoughness, 0.03f, 1.0f);
+	return roughness * roughness;
+}
+
+// The coat's own highlight times NdotL, for direct light.
+float evalClearcoatNdotL(BrdfData data, MaterialProperties material) {
+	if (material.clearcoat <= 0.0f || data.Lbackfacing || data.Vbackfacing) {
+		return 0.0f;
+	}
+	data.alpha = clearcoatAlpha(material);
+	data.alphaSquared = data.alpha * data.alpha;
+	float coatReflectance = clearcoatReflectance(material, data.LdotH);
+	data.F = float3(coatReflectance, coatReflectance, coatReflectance);
+	return evalMicrofacet(data).x;
+}
+
 // Entry point for direct light: diffuse (including backlight) and specular, both times NdotL.
 // Returned separately so the caller can apply the light's specular amount.
+// The subsurface share of the diffuse light is left out: it leaves the surface
+// somewhere else, and the caller lights it there.
 void evalCombinedBRDFSeparate(float3 N, float3 L, float3 V, MaterialProperties material, OUT_PARAMETER(float3) outDiffuse, OUT_PARAMETER(float3) outSpecular) {
 	// Uses shading normal N for all BRDF math.
 	const BrdfData data = prepareBRDFData(N, L, V, material);
 	float diffuseNdotL = godotDiffuseNdotL(data, dot(N, L), material.diffuseMode);
 	float3 backlit = material.backlight * (ONE_OVER_PI - diffuseNdotL);
 	outDiffuse = data.diffuseReflectance * (float3(diffuseNdotL, diffuseNdotL, diffuseNdotL) + backlit);
+	outDiffuse *= 1.0f - material.subsurface;
 	outSpecular = godotSpecularNdotL(data, material.specularMode, material.energyCompensation);
+	if (material.clearcoat > 0.0f) {
+		float underCoat = 1.0f - clearcoatReflectance(material, data.LdotH);
+		outDiffuse *= underCoat;
+		outSpecular = outSpecular * underCoat + float3(1.0f, 1.0f, 1.0f) * evalClearcoatNdotL(data, material);
+	}
 }
 
 // This is an entry point for evaluation of all other BRDFs based on selected configuration (for indirect light)

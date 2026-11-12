@@ -304,6 +304,7 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 	shadow_ps.offset_normal = vec3(0.0, 0.0, 1.0);
 	shadow_ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
 	shadow_ps.medium = 0u;
+	shadow_ps.exit_shift_m = 0.0;
 	path_pack(payload, shadow_ps);
 
 	hitObjectEXT hitObject;
@@ -331,6 +332,7 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 	shadow_ps.offset_normal = vec3(0.0, 0.0, 1.0);
 	shadow_ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
 	shadow_ps.medium = 0u;
+	shadow_ps.exit_shift_m = 0.0;
 	path_pack(payload, shadow_ps);
 
 	traceRayEXT(tlas,

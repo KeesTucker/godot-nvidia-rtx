@@ -64,6 +64,8 @@ layout(set = 0, binding = 6, std140) uniform RaytracingParams {
 	ivec4 rt_media[RT_MEDIA_COUNT];
 	// rt_caustics: global_shader_uniforms slots of rt_caustics_volume_min_m,
 	// rt_caustics_volume_max_m and rt_caustics_slices_per_light, -1 where undefined.
+	// The last is the slot of rt_camera_medium, a float global holding the id
+	// of the medium the camera is in, for a camera underwater.
 	ivec4 rt_caustics;
 };
 

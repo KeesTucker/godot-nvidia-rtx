@@ -14,7 +14,15 @@ struct MaterialResult {
 	float emission_indirect; // EMISSION_INDIRECT: weight of emissive (and unshaded) radiance on indirect paths.
 	vec3 normal; // Final shading normal (world space, after normal mapping).
 	vec3 backlight; // Light "leaking through" thin/translucent surfaces (BACKLIGHT).
+	float clearcoat; // CLEARCOAT: strength of a clear layer over the surface, with its own highlight.
+	float clearcoat_roughness; // CLEARCOAT_ROUGHNESS.
+	float subsurface; // SSS_STRENGTH: share of the diffuse light that scatters under the surface before it leaves.
+	vec3 subsurface_colour; // SSS_TRANSMITTANCE_COLOR: what's under the surface. Light keeps this much at each scattering.
+	float subsurface_mean_free_path_m; // SSS_TRANSMITTANCE_DEPTH: how far light goes between scatterings.
 };
+
+// Used when a shader writes SSS_STRENGTH but no SSS_TRANSMITTANCE_DEPTH.
+#define RT_SUBSURFACE_DEFAULT_MEAN_FREE_PATH_M 0.005
 
 // Sensible default for a mid-grey diffuse surface.
 MaterialResult default_material_result(vec3 geometry_normal) {
@@ -28,6 +36,11 @@ MaterialResult default_material_result(vec3 geometry_normal) {
 	r.emission_indirect = 1.0;
 	r.normal = geometry_normal;
 	r.backlight = vec3(0.0);
+	r.clearcoat = 0.0;
+	r.clearcoat_roughness = 0.0;
+	r.subsurface = 0.0;
+	r.subsurface_colour = vec3(1.0);
+	r.subsurface_mean_free_path_m = RT_SUBSURFACE_DEFAULT_MEAN_FREE_PATH_M;
 	return r;
 }
 

@@ -52,7 +52,7 @@ bool rt_debug_keeps_transparency(int p_vis_mode) {
 	return p_vis_mode == 0 || p_vis_mode == RT_VIS_TRANSPARENCY_LAYERS || p_vis_mode == RT_VIS_DYNAMIC_GEOMETRY;
 }
 // ============================================================================
-// PATHTRACING PAYLOAD (36 bytes, fp16/unorm-packed)
+// PATHTRACING PAYLOAD (40 bytes, fp16/unorm-packed)
 // ============================================================================
 // Radiance (r) and throughput (T) interleaved as fp16 into 3 uints:
 //   [0]=rg, [1]=bR, [2]=GB  (packHalf2x16 pairs).
@@ -61,6 +61,8 @@ bool rt_debug_keeps_transparency(int p_vis_mode) {
 // offset_normal)`. The offset normal and next direction are stored as
 // 16-bit unorm octahedral pairs (effective angular error <~0.001 deg,
 // below the 8-bit normal quantization baked into offset_ray_origin).
+// Light that left a subsurface-scattering surface somewhere else than it went
+// in starts its next ray there instead: exit_shift_m along the offset normal.
 // Use PathState + path_pack/path_unpack for fp32 working copies.
 
 struct PathPayload {
@@ -71,6 +73,7 @@ struct PathPayload {
 	uint oct_offset_nrm; //  4 bytes - packUnorm2x16(vec3_to_oct(offset normal))
 	uint oct_next_dir; //  4 bytes - packUnorm2x16(vec3_to_oct(next direction)); peel-ray input: SCENE_DEPTH, see path_pack_peel()
 	uint medium; //  4 bytes - material index + 1 of the dielectric the ray is inside, 0 = air
+	float exit_shift_m; //  4 bytes - subsurface exit: distance from the hit to the next origin, along the offset normal; 0 = none
 };
 
 // Set by path_pack_peel(), cleared by path_pack(): oct_next_dir holds the peel ray's SCENE_DEPTH, not a direction.
@@ -90,6 +93,7 @@ struct PathState {
 	vec3 offset_normal;
 	vec3 next_ray_dir;
 	uint medium; // Material index + 1 of the dielectric the ray is inside; 0 = air.
+	float exit_shift_m; // Subsurface exit: the next origin is this far from the hit along offset_normal; 0 = none.
 };
 
 PathState path_unpack(PathPayload p) {
@@ -105,6 +109,7 @@ PathState path_unpack(PathPayload p) {
 	s.offset_normal = oct_to_vec3(unpackUnorm2x16(p.oct_offset_nrm) * 2.0 - 1.0);
 	s.next_ray_dir = oct_to_vec3(unpackUnorm2x16(p.oct_next_dir) * 2.0 - 1.0);
 	s.medium = p.medium;
+	s.exit_shift_m = p.exit_shift_m;
 	return s;
 }
 
@@ -121,6 +126,7 @@ void path_pack(inout PathPayload p, PathState s) {
 	p.oct_offset_nrm = packUnorm2x16(vec3_to_oct(s.offset_normal));
 	p.oct_next_dir = packUnorm2x16(vec3_to_oct(s.next_ray_dir));
 	p.medium = s.medium;
+	p.exit_shift_m = s.exit_shift_m;
 }
 
 // Peel ray setup. p_scene_depth: NDC depth of the segment's opaque hit, 0.0 = far.

@@ -6835,11 +6835,11 @@ void RenderingDeviceDriverVulkan::command_trace_rays(CommandBufferID p_cmd_buffe
 
 // --- PIPELINE ---
 
-// Upper bound for PathPayload (36 bytes: packed_rt[3] + 6 more uint/float fields) / HitAttribs
+// Upper bound for PathPayload (40 bytes: packed_rt[3] + 7 more uint/float fields) / HitAttribs
 // (<=20 bytes); required by VkRayTracingPipelineInterfaceCreateInfoKHR whenever pipeline
 // libraries are used. Keep in sync with raytracing_inc.glsl / raytracing_common_inc.glsl.
 #if VULKAN_RAYTRACING_ENABLED
-static const uint32_t RT_LIBRARY_MAX_PAYLOAD_SIZE = 36;
+static const uint32_t RT_LIBRARY_MAX_PAYLOAD_SIZE = 40;
 static const uint32_t RT_LIBRARY_MAX_HIT_ATTRIBUTE_SIZE = 24;
 #endif
 

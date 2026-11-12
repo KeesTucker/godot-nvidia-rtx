@@ -150,7 +150,10 @@ struct MaterialData {
 	// faces (rt_outside_medium, 0 = air).
 	uint inside_medium;
 	uint outside_medium;
-	uint medium_padding[2];
+	// The clear coat's index of refraction (`uniform float rt_clearcoat_index_of_refraction`),
+	// 1.5 unless the shader says otherwise.
+	float clearcoat_index_of_refraction;
+	uint medium_padding;
 };
 
 // Bindless index of a MaterialData *_texture.

@@ -304,15 +304,34 @@ MaterialProperties material_properties(vec3 p_albedo, float p_metallic, float p_
 	float dfg_y = rt_prefiltered_dfg(p_roughness, clamp(p_NdotV, 0.0001, 1.0)).y;
 	material.energyCompensation = 1.0 + f0 * (1.0 / dfg_y - 1.0);
 	material.backlight = p_backlight;
+	material.clearcoat = 0.0;
+	material.clearcoatRoughness = 0.0;
+	material.clearcoatF0 = 0.0;
+	material.subsurface = 0.0;
 	material.diffuseMode = (p_mat_flags >> RT_MAT_DIFFUSE_MODE_SHIFT) & RT_MAT_SHADING_MODE_MASK;
 	material.specularMode = (p_mat_flags >> RT_MAT_SPECULAR_MODE_SHIFT) & RT_MAT_SHADING_MODE_MASK;
 	return material;
 }
 
+// A clear coat's reflectance at normal incidence, against the medium the ray
+// is in. Underwater a coat nearly vanishes, like any surface close to the
+// water's index.
+float rt_clearcoat_f0(uint p_geometry_idx) {
+	float coat_ior = max(rt_entry_material(p_geometry_idx).clearcoat_index_of_refraction, 1.0);
+	float medium_ior = max(rt_medium_index_of_refraction(payload.medium), 1.0);
+	float ratio = (coat_ior - medium_ior) / (coat_ior + medium_ior);
+	return ratio * ratio;
+}
+
 MaterialProperties material_properties_from_result(HitData h, MaterialResult m, vec3 N, vec3 V) {
+	uint mat_flags = rt_entry_material_flags(h.geometry_idx);
 	MaterialProperties material = material_properties(m.albedo, m.metalness, m.roughness, m.specular, m.backlight,
-			rt_entry_material_flags(h.geometry_idx), dot(N, V));
+			mat_flags, dot(N, V));
 	material.emissive = m.emissive;
+	material.clearcoat = m.clearcoat;
+	material.clearcoatRoughness = m.clearcoat_roughness;
+	material.clearcoatF0 = rt_clearcoat_f0(h.geometry_idx);
+	material.subsurface = m.subsurface;
 	return material;
 }
 
@@ -629,8 +648,135 @@ vec3 ambient_approx(vec3 N, vec3 V, MaterialResult m, MaterialProperties materia
 	return baseColorToDiffuseReflectance(material.baseColor, material.metalness) * ambient + specular;
 }
 
+// ============================================================================
+// SUBSURFACE SCATTERING
+// ============================================================================
+
+// A walk that hasn't left the mesh after this many scatterings leaves where it went in.
+#define RT_SUBSURFACE_MAX_SCATTERS 16u
+// A walk dimmer than this stops: what it would bring back can't be seen.
+#define RT_SUBSURFACE_MIN_WEIGHT 0.02
+
+// SubsurfaceExit is where light that went under a surface came back out, and
+// how much of it the medium left.
+struct SubsurfaceExit {
+	bool is_found;
+	vec3 position;
+	vec3 normal;
+	vec3 weight;
+};
+
+SubsurfaceExit subsurface_exit_none(HitData h) {
+	SubsurfaceExit none;
+	none.is_found = false;
+	none.position = h.hit_pos;
+	none.normal = h.geometry_normal;
+	none.weight = vec3(0.0);
+	return none;
+}
+
+vec3 subsurface_turn_from_z_axis(vec3 p_axis, vec3 p_direction_about_z) {
+	return normalize(rotatePoint(invertRotation(getRotationToZAxis(p_axis)), p_direction_about_z));
+}
+
+vec3 subsurface_any_direction(inout uint rng_state) {
+	vec2 u = rand2(rng_state);
+	float z = 1.0 - 2.0 * u.x;
+	float across = sqrt(max(0.0, 1.0 - z * z));
+	return vec3(across * cos(TWO_PI * u.y), across * sin(TWO_PI * u.y), z);
+}
+
+// The outward normal where a walk's ray query crossed the mesh's surface.
+vec3 subsurface_exit_normal(rayQueryEXT p_query, uint p_geometry_idx) {
+	GeometryData geom = geometries[p_geometry_idx];
+	vec2 hit_barycentrics = rayQueryGetIntersectionBarycentricsEXT(p_query, true);
+	vec3 barycentrics = vec3(1.0 - hit_barycentrics.x - hit_barycentrics.y, hit_barycentrics.x, hit_barycentrics.y);
+	uint i0, i1, i2;
+	get_triangle_indices_ex(geom, uint(rayQueryGetIntersectionPrimitiveIndexEXT(p_query, true)), i0, i1, i2);
+	mat3 model_rotation = mat3(rayQueryGetIntersectionObjectToWorldEXT(p_query, true));
+	mat3 normal_matrix = mat3(normalize(model_rotation[0]), normalize(model_rotation[1]), normalize(model_rotation[2]));
+	vec3 normal = normalize(normal_matrix * fetch_tbn(geom, i0, i1, i2, barycentrics).normal);
+	// From inside a closed mesh a walk meets back faces. A front face means
+	// a single sheet, whose normal points back at the walk.
+	bool is_front_face = rayQueryGetIntersectionFrontFaceEXT(p_query, true) != ((geom.flags & FLAG_FACING_INVERTED) != 0u);
+	return is_front_face ? -normal : normal;
+}
+
+// subsurface_walk follows light under a surface the way it goes: a random
+// walk through the medium inside the mesh. Each step runs a random distance
+// with the medium's mean free path, then the light turns any way at all and
+// keeps the medium's colour's share of itself. The walk ends where a step
+// crosses the mesh's own surface again. Anything else inside the mesh is
+// ignored, and so is reflection back in at the surface.
+SubsurfaceExit subsurface_walk(HitData h, MaterialResult m, inout uint rng_state) {
+	SubsurfaceExit exit = subsurface_exit_none(h);
+	exit.weight = vec3(1.0);
+	float mean_free_path_m = max(m.subsurface_mean_free_path_m, 1e-5);
+	vec3 position = offset_ray_origin(h.hit_pos, -h.geometry_normal);
+	// The surface is rough to light going in, so it spreads like diffuse light does going out.
+	vec3 direction = subsurface_turn_from_z_axis(-h.geometry_normal, sampleHemisphere(rand2(rng_state)));
+
+	for (uint scatter = 0u; scatter < RT_SUBSURFACE_MAX_SCATTERS; scatter++) {
+		float step_m = -log(max(1.0 - rand(rng_state), 1e-7)) * mean_free_path_m;
+		rayQueryEXT query;
+		// Every triangle is a candidate, so the walk can pick out its own mesh.
+		rayQueryInitializeEXT(query, tlas, gl_RayFlagsNoOpaqueEXT, 0xFFu, position, 0.0, direction, step_m);
+		while (rayQueryProceedEXT(query)) {
+			bool is_own_surface = rayQueryGetIntersectionTypeEXT(query, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+					RT_RQ_GEOMETRY_IDX(query, false) == h.geometry_idx;
+			if (is_own_surface) {
+				rayQueryConfirmIntersectionEXT(query);
+			}
+		}
+		bool has_left = rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+		if (has_left) {
+			exit.is_found = true;
+			exit.position = position + direction * rayQueryGetIntersectionTEXT(query, true);
+			exit.normal = subsurface_exit_normal(query, h.geometry_idx);
+			return exit;
+		}
+		position += direction * step_m;
+		exit.weight *= m.subsurface_colour;
+		bool is_too_dim = max(exit.weight.r, max(exit.weight.g, exit.weight.b)) < RT_SUBSURFACE_MIN_WEIGHT;
+		if (is_too_dim) {
+			return exit;
+		}
+		direction = subsurface_any_direction(rng_state);
+	}
+	// Still inside: a pale medium deep in a thick body. Dropping the light
+	// would darken it, so it leaves where it went in.
+	exit.is_found = true;
+	return exit;
+}
+
+// The walk for a hit, if its material scatters light under the surface at all.
+SubsurfaceExit subsurface_exit_of(HitData h, MaterialResult m, inout uint rng_state) {
+	bool scatters_under_surface = m.subsurface > 0.0 && !surface_is_unshaded(h.geometry_idx);
+	if (!scatters_under_surface) {
+		return subsurface_exit_none(h);
+	}
+	return subsurface_walk(h, m, rng_state);
+}
+
+// The surface as light leaving from under it sees it: plain diffuse, tinted by
+// the surface it came in through and by the medium on the way.
+MaterialProperties subsurface_exit_material(MaterialProperties p_entry_material, SubsurfaceExit p_exit) {
+	MaterialProperties material = p_entry_material;
+	material.baseColor = baseColorToDiffuseReflectance(p_entry_material.baseColor, p_entry_material.metalness) * p_exit.weight;
+	material.metalness = 0.0;
+	material.dielectricF0 = 0.0;
+	material.energyCompensation = vec3(1.0);
+	material.backlight = vec3(0.0);
+	material.clearcoat = 0.0;
+	material.subsurface = 0.0;
+	material.diffuseMode = GODOT_DIFFUSE_LAMBERT;
+	material.specularMode = GODOT_SPECULAR_DISABLED;
+	return material;
+}
+
 // p_is_indirect: the path made a diffuse bounce, scaling lights by indirect_energy and emission by emission_indirect.
-vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_indirect, inout uint rng_state) {
+// p_subsurface_exit: where the subsurface share of the light leaves, lit there and not at the hit.
+vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_indirect, SubsurfaceExit p_subsurface_exit, inout uint rng_state) {
 	float emission_weight = p_is_indirect ? m.emission_indirect : 1.0;
 	if (surface_is_unshaded(h.geometry_idx)) {
 		return (m.albedo + m.emissive) * emission_weight;
@@ -649,6 +795,12 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 	} else {
 		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material,
 				rng_state, p_is_indirect, light_count, layers, shadow_mask);
+	}
+	if (p_subsurface_exit.is_found && material.subsurface > 0.0) {
+		float under_coat = 1.0 - clearcoatReflectance(material, clamp(dot(N, V), 0.0, 1.0));
+		vec3 exit_pos_offset = offset_ray_origin(p_subsurface_exit.position, p_subsurface_exit.normal);
+		lit += material.subsurface * under_coat * lights_evaluate_direct_lighting(exit_pos_offset, p_subsurface_exit.normal, p_subsurface_exit.normal,
+				subsurface_exit_material(material, p_subsurface_exit), rng_state, p_is_indirect, light_count, layers, shadow_mask);
 	}
 	return lit;
 }
@@ -692,7 +844,50 @@ void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, MaterialData surf
 	ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags) & ~LAST_BOUNCE_DIFFUSE_FLAG;
 }
 
-bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, inout PathState ps) {
+// The clear coat's highlight as a bounce. The caller picks it with the coat's
+// reflectance as the probability, which stands in for its Fresnel term.
+bool sample_clearcoat_continuation(HitData h, vec3 N, vec3 V, MaterialProperties material, inout PathState ps) {
+	MaterialProperties coat = material;
+	coat.baseColor = vec3(1.0);
+	coat.metalness = 1.0;
+	coat.roughness = sqrt(clearcoatAlpha(material));
+	coat.energyCompensation = vec3(1.0);
+	vec3 next_dir;
+	vec3 coat_weight;
+	if (!evalIndirectCombinedBRDF(rand2(ps.rng_state), N, h.geometry_normal, V, coat, SPECULAR_TYPE, next_dir, coat_weight, vec4(0.0))) {
+		return false;
+	}
+	ps.throughput *= coat_weight;
+	ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags) & ~LAST_BOUNCE_DIFFUSE_FLAG;
+	if (coat.roughness > SINGULAR_ROUGHNESS_MAX) {
+		ps.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
+	}
+	ps.offset_normal = h.geometry_normal;
+	ps.next_ray_dir = next_dir;
+	return true;
+}
+
+// Light that went under the surface carries on from where it came out. The
+// payload can only say "this far along the offset normal", so the offset
+// normal points from the hit to the exit.
+bool sample_subsurface_continuation(HitData h, vec3 p_diffuse_reflectance, SubsurfaceExit p_exit, inout PathState ps) {
+	if (!p_exit.is_found) {
+		return false;
+	}
+	vec3 to_exit = offset_ray_origin(p_exit.position, p_exit.normal) - h.hit_pos;
+	float exit_shift_m = length(to_exit);
+	if (exit_shift_m <= 0.0) {
+		return false;
+	}
+	ps.throughput *= p_diffuse_reflectance * p_exit.weight;
+	ps.packed_bounces_flags = inc_diffuse_bounce(ps.packed_bounces_flags) | LAST_BOUNCE_DIFFUSE_FLAG | NON_SINGULAR_PATH_FLAG;
+	ps.offset_normal = to_exit / exit_shift_m;
+	ps.exit_shift_m = exit_shift_m;
+	ps.next_ray_dir = subsurface_turn_from_z_axis(p_exit.normal, sampleHemisphere(rand2(ps.rng_state)));
+	return true;
+}
+
+bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, SubsurfaceExit p_subsurface_exit, inout PathState ps) {
 	if (surface_is_unshaded(h.geometry_idx)) {
 		return false;
 	}
@@ -709,6 +904,13 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 	}
 
 	MaterialProperties material = material_properties_from_result(h, m, N, V);
+	// The coat takes its share of the light first. What's under it gets the
+	// rest, which the choice itself accounts for.
+	float coat_reflectance = clearcoatReflectance(material, clamp(dot(N, V), 0.0, 1.0));
+	bool reflects_off_coat = coat_reflectance > 0.0 && rand(ps.rng_state) < coat_reflectance;
+	if (reflects_off_coat) {
+		return sample_clearcoat_continuation(h, N, V, material, ps);
+	}
 	vec3 specular_f0 = baseColorToSpecularF0(material.baseColor, material.metalness, material.dielectricF0);
 	vec3 diffuse_reflectance = baseColorToDiffuseReflectance(material.baseColor, material.metalness);
 	float specular_lum = luminance(specular_f0);
@@ -728,6 +930,11 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 			brdf_type = DIFFUSE_TYPE;
 			ps.throughput /= (1.0 - brdf_probability);
 		}
+	}
+
+	bool goes_under_surface = brdf_type == DIFFUSE_TYPE && material.subsurface > 0.0 && rand(ps.rng_state) < material.subsurface;
+	if (goes_under_surface) {
+		return sample_subsurface_continuation(h, diffuse_reflectance, p_subsurface_exit, ps);
 	}
 
 	vec3 next_dir;
@@ -849,6 +1056,7 @@ void dlss_rr_guide_hit(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV,
 	gs.offset_normal = offset_normal;
 	gs.next_ray_dir = next_ray_dir;
 	gs.medium = 0u;
+	gs.exit_shift_m = 0.0;
 	path_pack(payload, gs);
 	vec3 motion = continues ? vec3(0.0) : rt_hit_prev_world_pos(h.hit_pos) - h.hit_pos;
 	payload.packed_rt[0] = packHalf2x16(motion.xy);
@@ -905,6 +1113,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	PathState ps = path_unpack(payload);
 	// Every surface bounds this ray segment, even if it cannot continue the path.
 	ps.hit_t = gl_HitTEXT;
+	ps.exit_shift_m = 0.0;
 
 	vec3 V = -gl_WorldRayDirectionEXT;
 
@@ -940,6 +1149,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 		float material_alpha = clamp(m.alpha, 0.0, 1.0);
 		float peel_alpha;
 		float continuation_alpha = 0.0;
+		SubsurfaceExit subsurface_exit = subsurface_exit_none(h);
 		vec3 fogged_throughput = ps.throughput;
 		vec3 branch_fog = vec3(0.0);
 		apply_segment_fog(gl_HitTEXT, mat_flags, get_total_bounces(ps.packed_bounces_flags) == 0u, branch_fog, fogged_throughput);
@@ -952,8 +1162,9 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			peel_alpha = (bclass == RT_BLEND_CLASS_ADD || bclass == RT_BLEND_CLASS_SUB) ? 0.0 : material_alpha;
 			ps.throughput = fogged_throughput;
 			path_pack(payload, ps);
+			subsurface_exit = subsurface_exit_of(h, m, ps.rng_state);
 			vec3 lit = shade_local_surface(h, m, N, V,
-					get_diffuse_bounces(ps.packed_bounces_flags) > 0u, ps.rng_state);
+					get_diffuse_bounces(ps.packed_bounces_flags) > 0u, subsurface_exit, ps.rng_state);
 			float source_alpha = (bclass == RT_BLEND_CLASS_PREMULT) ? 1.0 : material_alpha;
 			vec3 contribution = ps.throughput * source_alpha * lit;
 			if (bclass == RT_BLEND_CLASS_SUB) {
@@ -997,7 +1208,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 		ps.packed_bounces_flags &= ~PEEL_HAS_CONTINUATION_FLAG;
 		// Continue with probability continuation_alpha rather than scaling throughput by
 		// it, so faint layers rarely spawn a full indirect path.
-		if (rand(ps.rng_state) < continuation_alpha && sample_surface_continuation(h, m, N, V, ps)) {
+		if (rand(ps.rng_state) < continuation_alpha && sample_surface_continuation(h, m, N, V, subsurface_exit, ps)) {
 			ps.packed_bounces_flags |= PEEL_HAS_CONTINUATION_FLAG;
 		}
 		path_pack(payload, ps);
@@ -1011,7 +1222,8 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	apply_segment_fog(gl_HitTEXT, rt_entry_material_flags(h.geometry_idx), total_bounces == 0u, ps.radiance, ps.throughput);
 
 	path_pack(payload, ps);
-	ps.radiance += ps.throughput * shade_local_surface(h, m, N, V, diffuse_bounces > 0u, ps.rng_state);
+	SubsurfaceExit subsurface_exit = subsurface_exit_of(h, m, ps.rng_state);
+	ps.radiance += ps.throughput * shade_local_surface(h, m, N, V, diffuse_bounces > 0u, subsurface_exit, ps.rng_state);
 
 	// Haze: single scattering of the lights into this segment. Only the opaque
 	// hit adds it, so peel layers inside the segment don't count it twice.
@@ -1086,7 +1298,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	}
 #endif
 
-	if (!sample_surface_continuation(h, m, N, V, ps)) {
+	if (!sample_surface_continuation(h, m, N, V, subsurface_exit, ps)) {
 		ps.packed_bounces_flags = set_path_terminated(ps.packed_bounces_flags);
 	}
 	path_pack(payload, ps);
