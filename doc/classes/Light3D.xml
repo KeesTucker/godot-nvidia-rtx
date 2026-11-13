@@ -106,6 +106,9 @@
 			Sets the color temperature of the light source, measured in Kelvin. This is used to calculate a correlated color temperature which tints the [member light_color].
 			The sun on a cloudy day is approximately 6500 Kelvin, on a clear day it is between 5500 to 6000 Kelvin, and on a clear day at sunrise or sunset it ranges to around 1850 Kelvin.
 		</member>
+		<member name="light_violet_energy" type="float" setter="set_param" getter="get_param" default="0.0">
+			The light's violet and ultraviolet output, which [member light_color] can't show, as a multiplier on [member light_energy]. It makes a surface's [code]FLUORESCENCE[/code] glow, and it is the only light that makes the blue of it glow. At [code]1.0[/code] it counts as much as a pure blue light of the same energy. Only the path tracer uses it, and only for light arriving straight from the light.
+		</member>
 		<member name="light_volumetric_fog_energy" type="float" setter="set_param" getter="get_param" default="1.0">
 			Secondary multiplier multiplied with [member light_energy] then used with the [Environment]'s volumetric fog (if enabled). If set to [code]0.0[/code], computing volumetric fog will be skipped for this light, which can improve performance for large amounts of lights when volumetric fog is enabled.
 			[b]Note:[/b] To prevent short-lived dynamic light effects from poorly interacting with volumetric fog, lights used in those effects should have [member light_volumetric_fog_energy] set to [code]0.0[/code] unless [member Environment.volumetric_fog_temporal_reprojection_enabled] is disabled (or unless the reprojection amount is significantly lowered).
@@ -201,7 +204,10 @@
 		<constant name="PARAM_INTENSITY" value="20" enum="Param">
 			Constant for accessing [member light_intensity_lumens] and [member light_intensity_lux]. Only used when [member ProjectSettings.rendering/lights_and_shadows/use_physical_light_units] is [code]true[/code].
 		</constant>
-		<constant name="PARAM_MAX" value="21" enum="Param">
+		<constant name="PARAM_VIOLET_ENERGY" value="21" enum="Param">
+			Constant for accessing [member light_violet_energy].
+		</constant>
+		<constant name="PARAM_MAX" value="22" enum="Param">
 			Represents the size of the [enum Param] enum.
 		</constant>
 		<constant name="BAKE_DISABLED" value="0" enum="BakeMode">

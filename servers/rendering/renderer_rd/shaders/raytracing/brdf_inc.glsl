@@ -1143,13 +1143,18 @@ float evalClearcoatNdotL(BrdfData data, MaterialProperties material) {
 // -------------------------------------------------------------------------
 
 // Fluorescence: a pigment soaks up light and gives it back at a longer
-// wavelength, evenly in every direction. So red comes from the green and blue
-// light arriving, and green from the blue. Nothing gives blue: RGB can't tell
-// ultraviolet from blue. Returns the light given off, not a BRDF, because one
-// colour of light turns into another. Direct light only: a path's throughput
-// is one number per colour and can't carry the crossing.
-float3 evalFluorescenceNdotL(float3 N, float3 L, MaterialProperties material, float3 arrivingLight) {
-	float3 exciting = float3(0.5f * (arrivingLight.g + arrivingLight.b), arrivingLight.b, 0.0f);
+// wavelength, evenly in every direction. So each colour comes from the mean of
+// the shorter ones arriving: red from green, blue and violet, green from blue
+// and violet, blue from violet. arrivingViolet is the violet and ultraviolet a
+// light says it has: RGB can't carry anything shorter than blue. Returns the
+// light given off, not a BRDF, because one colour of light turns into another.
+// Direct light only: a path's throughput is one number per colour and can't
+// carry the crossing, or the violet.
+float3 evalFluorescenceNdotL(float3 N, float3 L, MaterialProperties material, float3 arrivingLight, float arrivingViolet) {
+	float3 exciting = float3(
+			(arrivingLight.g + arrivingLight.b + arrivingViolet) / 3.0f,
+			0.5f * (arrivingLight.b + arrivingViolet),
+			arrivingViolet);
 	return material.fluorescence * exciting * (max(dot(N, L), 0.0f) * ONE_OVER_PI);
 }
 

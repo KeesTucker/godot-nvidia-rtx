@@ -398,7 +398,9 @@ struct alignas(16) RT_LightData {
 	} projector_texture;
 	// caustics_layer is 1 + the light's layer in the rt_caustics_volume global, or 0 when it has none.
 	uint32_t caustics_layer;
-	uint32_t reserved[2]; // Free for future fields, keeps the 64-byte stride.
+	// violet_emission is the light shorter than blue, on the scale of emission. It only excites fluorescence.
+	float violet_emission;
+	uint32_t reserved; // Free for a future field, keeps the 64-byte stride.
 };
 static_assert(sizeof(RT_LightData) == 64, "RT_LightData must be 64 bytes for std430, with every bitfield struct in one uint");
 

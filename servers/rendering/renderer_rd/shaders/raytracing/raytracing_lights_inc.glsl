@@ -35,14 +35,15 @@ struct RTLightPacked {
 	uint orientation_zw; // snorm16 quaternion z, w.
 	uint projector_texture; // index : 24, unused : 8.
 	uint caustics_layer; // 1 + layer in rt_caustics_volume, 0 = none.
-	uint reserved1; // Free for future fields, keeps the 64-byte stride.
-	uint reserved2;
+	float violet_emission; // Light shorter than blue, on the scale of emission.
+	uint reserved; // Free for a future field, keeps the 64-byte stride.
 };
 
 struct RTLightData {
 	vec3 position; // World pos (omni/spot) or direction (directional).
 	uint type; // RT_LIGHT_TYPE_*.
 	vec3 emission; // HDR emission color (color * energy).
+	float violet_emission; // Light shorter than blue, which emission can't carry. It only excites fluorescence.
 	float radius; // Light size (omni/spot) or angular radius (directional).
 	float attenuation; // Attenuation exponent (2=inverse-square, 1=linear).
 	float inv_max_range; // 1/range (-1 = infinite).
@@ -80,6 +81,7 @@ RTLightData lights_get(uint idx) {
 	light.type = bitfieldExtract(p.masks, 20, 2);
 	vec2 emission_b_radius = unpackHalf2x16(p.emission_b_radius);
 	light.emission = vec3(unpackHalf2x16(p.emission_rg), emission_b_radius.x);
+	light.violet_emission = p.violet_emission;
 	light.radius = emission_b_radius.y;
 	vec2 energy = unpackHalf2x16(p.energy);
 	light.specular_amount = energy.x;
@@ -486,8 +488,11 @@ vec3 lights_evaluate_positional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V,
 	float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
 	// NdotL is already included in brdf_value.
-	vec3 arriving_light = light.emission * projector_color * shadow_transmittance * atten * indirect_mul;
-	return brdf_value * arriving_light + evalFluorescenceNdotL(N, L, material, arriving_light);
+	vec3 share_arriving = projector_color * shadow_transmittance * atten * indirect_mul;
+	vec3 arriving_light = light.emission * share_arriving;
+	// Violet is lost on the way like blue, its nearest colour.
+	float arriving_violet = light.violet_emission * share_arriving.b;
+	return brdf_value * arriving_light + evalFluorescenceNdotL(N, L, material, arriving_light, arriving_violet);
 }
 
 // Unweighted contribution of one directional light, one shadow ray.
@@ -511,8 +516,10 @@ vec3 lights_evaluate_directional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V
 
 	float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
-	vec3 arriving_light = light.emission * shadow_transmittance * indirect_mul;
-	return brdf_value * arriving_light + evalFluorescenceNdotL(N, L, material, arriving_light);
+	vec3 share_arriving = shadow_transmittance * indirect_mul;
+	vec3 arriving_light = light.emission * share_arriving;
+	float arriving_violet = light.violet_emission * share_arriving.b;
+	return brdf_value * arriving_light + evalFluorescenceNdotL(N, L, material, arriving_light, arriving_violet);
 }
 
 // NEE with one shadow ray to a single light selected among all lights.

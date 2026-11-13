@@ -5476,6 +5476,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, cons
 		r_ld.emission_rg.g = rt_half(emission.g);
 		r_ld.emission_b_radius.b = rt_half(emission.b);
 		r_ld.emission_b_radius.radius = rt_half(p_radius);
+		r_ld.violet_emission = MAX(p_energy * ls->light_get_param(p_base, RSE::LIGHT_PARAM_VIOLET_ENERGY), 0.0f);
 		r_ld.energy.specular = rt_half(p_specular);
 		r_ld.energy.indirect = rt_half(ls->light_get_param(p_base, RSE::LIGHT_PARAM_INDIRECT_ENERGY));
 		r_ld.masks.cull_mask = ls->light_get_cull_mask(p_base);
