@@ -74,7 +74,7 @@ namespace RendererSceneRenderImplementation {
 class RenderForwardClustered;
 class SceneShaderRaytracing;
 
-// Must match GLSL GeometryData (std430, 144 bytes, 8-byte alignment).
+// Must match GLSL GeometryData (std430, 168 bytes, 8-byte alignment).
 struct alignas(8) RT_GeometryData {
 	uint64_t vertex_buffer_address;
 	uint64_t attribute_buffer_address;
@@ -111,8 +111,17 @@ struct alignas(8) RT_GeometryData {
 	uint32_t debug_state; // See RTDynamicGeometryDebug::pack().
 	uint32_t material_index; // See rt_pack_material_index().
 	uint32_t material_flags;
+	// For captured geometry: the mesh's own positions, which vertex() read before it moved them. Hit shaders re-run
+	// vertex() on these for the varyings. 0 when there are none. Compressed ones decode with the aabb fields above.
+	uint32_t rest_vertex_buffer_address_lo;
+	uint32_t rest_vertex_buffer_address_hi;
+	uint32_t rest_position_stride;
+	uint32_t rest_flags; // RT_REST_FLAG_*.
 };
-static_assert(sizeof(RT_GeometryData) == 152, "RT_GeometryData must be 152 bytes for std430");
+static_assert(sizeof(RT_GeometryData) == 168, "RT_GeometryData must be 168 bytes for std430");
+
+// RT_GeometryData::rest_flags bits (must match REST_FLAG_* in raytracing_inc.glsl).
+static constexpr uint32_t RT_REST_FLAG_COMPRESSED = 1u;
 
 // Marks an absent field in RT_GeometryData::instance_data_layout.
 static constexpr uint32_t RT_INSTANCE_DATA_FIELD_NONE = 0xFF;
@@ -691,6 +700,9 @@ struct RTDeformedGeometrySource {
 	RID current_vb;
 	uint32_t current_vb_offset = 0; // Byte offset of the surface's positions in `current_vb`.
 	bool captured = false; // Vertex capture output (RT_GEOM_FLAG_CAPTURED). Only `change_stamp` tells captures apart.
+	// For a capture, the skeleton or blend shape output its vertex() read, uncompressed. Invalid when vertex() read the
+	// mesh surface's own buffer.
+	RID rest_deformed_vb;
 	bool force_rebuild = false; // Rebuild the BLAS even when a refit would do.
 	RID prev_vb; // Previous-frame positions for motion vectors. Optional.
 	uint64_t change_stamp = 0; // Changes when `current_vb` contents change.

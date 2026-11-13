@@ -12,7 +12,7 @@ layout(buffer_reference, std430) readonly buffer Uint32Buffer {
 };
 
 // ============================================================================
-// GEOMETRY DATA (matches C++ RT_GeometryData, 152 bytes, 8-byte alignment)
+// GEOMETRY DATA (matches C++ RT_GeometryData, 168 bytes, 8-byte alignment)
 // ============================================================================
 struct GeometryData {
 	uint64_t vertex_address;
@@ -58,6 +58,12 @@ struct GeometryData {
 	uint debug_state; // See RTDynamicGeometryDebug::pack().
 	uint material_index; // See rt_pack_material_index().
 	uint material_flags;
+
+	// For captured geometry: the positions vertex() read before it moved them, or 0. See rt_rest_triangle_object_pos().
+	uint rest_vertex_address_lo;
+	uint rest_vertex_address_hi;
+	uint rest_position_stride;
+	uint rest_flags; // REST_FLAG_*.
 };
 
 // ============================================================================

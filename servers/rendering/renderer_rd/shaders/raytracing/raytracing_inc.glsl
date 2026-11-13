@@ -280,6 +280,8 @@ const uint FLAG_FACING_INVERTED = 32u;
 const uint FLAG_SIDE_CHECK = 64u;
 // SELF_SHADOWING receiver: its shadow rays keep RT_PARAM_SELF_SHADOW_MASK.
 const uint FLAG_SELF_SHADOWING = 128u;
+// GeometryData::rest_flags: the rest positions are unorm16 in the aabb fields' box (C++ RT_REST_FLAG_COMPRESSED).
+const uint REST_FLAG_COMPRESSED = 1u;
 
 // ============================================================================
 // RANDOM NUMBER GENERATION - PCG (Permuted Congruential Generator)

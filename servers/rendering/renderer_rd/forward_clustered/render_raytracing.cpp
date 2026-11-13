@@ -1287,6 +1287,41 @@ RTSurfaceData *RenderRaytracing::process_surface_cached(
 // Deformed surface processing
 // ---------------------------------------------------------------------------
 
+// Points a captured surface's geometry at the positions its vertex() read, so a hit shader re-running vertex() for the
+// varyings starts where the rasterizer's did. Looked up every frame: a skeleton swaps its output buffers.
+static void _set_rest_positions(void *p_mesh_surface, const RTDeformedGeometrySource &p_source, RT_GeometryData &r_geometry) {
+	r_geometry.rest_vertex_buffer_address_lo = 0;
+	r_geometry.rest_vertex_buffer_address_hi = 0;
+	r_geometry.rest_position_stride = 0;
+	r_geometry.rest_flags = 0;
+	if (!p_source.captured) {
+		return;
+	}
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	const bool reads_deformed_output = p_source.rest_deformed_vb.is_valid();
+	const RID rest_vb = reads_deformed_output ? p_source.rest_deformed_vb : mesh_storage->mesh_surface_get_vertex_buffer(p_mesh_surface);
+	if (!rest_vb.is_valid()) {
+		return;
+	}
+	const uint64_t format = mesh_storage->mesh_surface_get_format(p_mesh_surface);
+	const bool is_compressed = !reads_deformed_output && (format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES);
+	const uint64_t rest_address = RD::get_singleton()->buffer_get_device_address(rest_vb);
+	r_geometry.rest_vertex_buffer_address_lo = static_cast<uint32_t>(rest_address & 0xFFFFFFFFULL);
+	r_geometry.rest_vertex_buffer_address_hi = static_cast<uint32_t>(rest_address >> 32);
+	r_geometry.rest_position_stride = is_compressed ? sizeof(uint16_t) * 4 : sizeof(float) * 3;
+	if (is_compressed) {
+		// A deformed surface is never RT_GEOM_FLAG_COMPRESSED, so the aabb fields are free to decode the rest positions.
+		const AABB surface_aabb = mesh_storage->mesh_surface_get_aabb(p_mesh_surface);
+		r_geometry.rest_flags = RT_REST_FLAG_COMPRESSED;
+		r_geometry.aabb_size_x = surface_aabb.size.x;
+		r_geometry.aabb_size_y = surface_aabb.size.y;
+		r_geometry.aabb_size_z = surface_aabb.size.z;
+		r_geometry.aabb_pos_x = surface_aabb.position.x;
+		r_geometry.aabb_pos_y = surface_aabb.position.y;
+		r_geometry.aabb_pos_z = surface_aabb.position.z;
+	}
+}
+
 RTSurfaceData *RenderRaytracing::process_deformed_surface(
 		void *p_mesh_surface,
 		const RTDeformedGeometrySource &p_source,
@@ -1404,6 +1439,7 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 		const uint64_t prev_addr = _rt_buffer_address(entry.prev_pos_vb, entry.prev_pos_vb_address, entry.ptr->sources.prev_vertex);
 		entry.ptr->geometry.prev_vertex_buffer_address_lo = static_cast<uint32_t>(prev_addr & 0xFFFFFFFFULL);
 		entry.ptr->geometry.prev_vertex_buffer_address_hi = static_cast<uint32_t>(prev_addr >> 32);
+		_set_rest_positions(p_mesh_surface, p_source, entry.ptr->geometry);
 	}
 
 	entry.cached_change_stamp = p_source.change_stamp;
@@ -4866,6 +4902,9 @@ RTDeformedGeometrySource RTTlasBuilder::_deformed_source(const Instance &p_inst,
 	const SurfaceCache *surf = static_cast<const SurfaceCache *>(p_surface.surf);
 	RTDeformedGeometrySource source;
 	const bool captured = p_surface.deformed_kind == RT_PLAN_DEFORMED_CAPTURED && rt._resolve_captured_source(surf, captures, source);
+	if (captured && p_inst.mesh_instance.is_valid()) {
+		source.rest_deformed_vb = RendererRD::MeshStorage::get_singleton()->mesh_instance_get_vertex_buffer(p_inst.mesh_instance, surf->surface_index);
+	}
 	if (!captured && p_inst.mesh_instance.is_valid()) {
 		source = _rt_mesh_instance_source(p_inst.mesh_instance, surf->surface_index);
 		source.cache_handle = &surf->rt_deformed_handle;

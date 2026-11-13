@@ -83,6 +83,38 @@ void get_triangle_indices_ex(in GeometryData geom, uint primitive_id, out uint i
 	}
 }
 
+// ============================================================================
+// REST POSITIONS
+// ============================================================================
+vec3 rt_rest_vertex_object_pos(in GeometryData geom, uint64_t p_rest_address, uint p_index) {
+	uint stride_words = geom.rest_position_stride >> 2;
+	if ((geom.rest_flags & REST_FLAG_COMPRESSED) != 0u) {
+		Uint32Buffer rest_vb = Uint32Buffer(p_rest_address);
+		uint low_word = rest_vb.v[p_index * stride_words];
+		uint high_word = rest_vb.v[p_index * stride_words + 1u];
+		vec3 in_box = vec3(float(low_word & 0xFFFFu), float(low_word >> 16), float(high_word & 0xFFFFu)) / 65535.0;
+		return vec3(geom.aabb_pos_x, geom.aabb_pos_y, geom.aabb_pos_z) + in_box * vec3(geom.aabb_size_x, geom.aabb_size_y, geom.aabb_size_z);
+	}
+	FloatBuffer rest_vb = FloatBuffer(p_rest_address);
+	uint first = p_index * stride_words;
+	return vec3(rest_vb.v[first], rest_vb.v[first + 1u], rest_vb.v[first + 2u]);
+}
+
+// The object-space position vertex() read at a triangle point of captured geometry, before it moved it. p_fallback
+// when the geometry keeps no rest positions.
+vec3 rt_rest_triangle_object_pos(in GeometryData geom, uint p_primitive_id, vec2 p_bary, vec3 p_fallback) {
+	uint64_t rest_address = packUint2x32(uvec2(geom.rest_vertex_address_lo, geom.rest_vertex_address_hi));
+	if (rest_address == 0ul) {
+		return p_fallback;
+	}
+	uint i0, i1, i2;
+	get_triangle_indices_ex(geom, p_primitive_id, i0, i1, i2);
+	vec3 bary = vec3(1.0 - p_bary.x - p_bary.y, p_bary.x, p_bary.y);
+	return bary.x * rt_rest_vertex_object_pos(geom, rest_address, i0) +
+			bary.y * rt_rest_vertex_object_pos(geom, rest_address, i1) +
+			bary.z * rt_rest_vertex_object_pos(geom, rest_address, i2);
+}
+
 #if defined(RT_STAGE_CLOSEST_HIT) || defined(RT_STAGE_ANY_HIT) || defined(RT_STAGE_INTERSECTION)
 // Convenience wrapper using gl_PrimitiveID (hit shaders only).
 void get_triangle_indices(in GeometryData geom, out uint i0, out uint i1, out uint i2) {

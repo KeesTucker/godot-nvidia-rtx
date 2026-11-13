@@ -60,12 +60,16 @@ mat4 rt_default_modelview_matrix = rt_view_matrix * read_model_matrix;
 rt_modelview_matrix = rt_default_modelview_matrix;
 rt_modelview_normal_matrix = mat3(rt_modelview_matrix);
 
-// Captured geometry already went through vertex(); re-running it must only produce the varyings.
+// Captured geometry already went through vertex(); re-running it must only produce the varyings. It runs from the
+// position vertex() read in the capture, so a varying taken from VERTEX matches the rasterizer's.
 bool rt_captured = (rt_geom.flags & FLAG_CAPTURED) != 0u;
 vec3 rt_captured_vertex = vertex;
 vec3 rt_captured_normal = normal;
 vec3 rt_captured_tangent = tangent;
 vec3 rt_captured_binormal = binormal;
+if (rt_captured) {
+	vertex = rt_rest_triangle_object_pos(rt_geom, uint(gl_PrimitiveID), attribs, vertex);
+}
 
 // Run vertex shader (computes varyings, may modify built-ins).
 /* RT_CUSTOM_VERTEX_CALL */
