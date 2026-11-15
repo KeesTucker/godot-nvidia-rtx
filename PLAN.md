@@ -116,6 +116,49 @@ parameters and the meadow went black. Fix: convert defaults the same way
 remaining custom shaders after, since any colours tuned on the raw defaults
 will darken.
 
+## Bug: shadow rays through a medium overflow
+
+A shadow ray starts with its origin medium's loss over its whole length,
+`exp(-extinction * t_max)` (`ray_query_shadow_transmittance`), and each
+dielectric crossing multiplies in `exp(-extinction_change * rest_of_ray)`
+(`rt_shadow_dielectric_crossing_transmittance`), so a ray that leaves the water
+takes back what the start charged for the air beyond. Past about 88 in the
+exponent a float runs out: the start underflows to 0, the crossing overflows
+to ∞, and 0 × ∞ is NaN, which DLSS-RR shows as bare albedo on black. Found
+2026-11-15 in seagrass-tank's fish gym, an open sea under the sun:
+
+- A directional light's shadow ray is effectively endless, so any directional
+  light is NaN for a point under water. The gym lights its sea with a point
+  lamp 10 m off and keeps the directional sun for the sky's disc.
+- Murky water (extinction 1.9 a metre) overflowed on 65 m shadow rays to a
+  point lamp 40 m off, so the gym shrank its scene to fit.
+
+The tank never hit it: its lights are a short way above shallow, clear water.
+
+Fix: add up optical depth instead of multiplying transmittances. Start the
+ray with `extinction * t_max`, add `extinction_change * rest_of_ray` at each
+crossing (a sum is as order-free as the product, as any-hit needs), and take
+`exp(-optical_depth)` once at the end, clamped at 0. The ray-query path keeps
+it in a local. The traceRay path (`scene_raytracing_raygen.glsl`'s shadow
+any-hit) multiplies `shadow_ps.throughput`, so it needs the sum in the shadow
+payload instead. For a directional light, cap `t_max` at something like 10 km
+first, or `extinction * t_max - extinction * (t_max - t_hit)` loses `t_hit`
+to rounding. Then check the gym's sea with a real directional sun, walls 30 m
+off and the haze up.
+
+Two smaller things from the same session:
+
+- A ray that misses while in a medium (`#[miss]`) returns the sky with no
+  absorption or haze at all, so open water with nothing to hit shows the raw
+  sky, dark below the horizon. The gym walls its sea in at 10 m. Ending the miss
+  at a fixed distance would need the haze's light loop and shadow rays in
+  the miss stage, so leave it unless a scene needs open water.
+- `rt_medium` (and `rt_outside_medium`) only count when the material sets
+  them: `get_medium` reads `material_get_param`, which is nil for a value
+  left at the shader's default, so a dielectric relying on its default is an
+  opaque black lid. Fall back to the shader's default, as the source_color
+  bug above wants for colours.
+
 ## Later
 
 Opacity micromaps, linear swept spheres, cluster/partitioned acceleration
