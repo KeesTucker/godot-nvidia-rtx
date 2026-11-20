@@ -1776,6 +1776,32 @@ uint64_t RenderingDevice::buffer_get_device_address(RID p_buffer) {
 	return driver->buffer_get_device_address(buffer->driver_id);
 }
 
+int64_t RenderingDevice::buffer_get_external_memory_fd(RID p_buffer) {
+	ERR_RENDER_THREAD_GUARD_V(-1);
+
+	Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	ERR_FAIL_NULL_V_MSG(buffer, -1, "Buffer argument is not a valid buffer of any type.");
+	ERR_FAIL_COND_V_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_EXTERNAL_MEMORY_BIT), -1, "Buffer was not created with the external memory flag.");
+	// The importer reads the VRAM outside the frame's semaphores, so the initial upload must land now, or it can
+	// land over the importer's first writes.
+	if (buffer->transfer_worker_index >= 0) {
+		_submit_transfer_workers();
+		_wait_for_transfer_workers();
+		buffer->transfer_worker_index = -1;
+	}
+
+	return driver->buffer_get_external_memory_fd(buffer->driver_id);
+}
+
+uint64_t RenderingDevice::buffer_get_external_memory_size(RID p_buffer) {
+	ERR_RENDER_THREAD_GUARD_V(0);
+
+	Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	ERR_FAIL_NULL_V_MSG(buffer, 0, "Buffer argument is not a valid buffer of any type.");
+	ERR_FAIL_COND_V_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_EXTERNAL_MEMORY_BIT), 0, "Buffer was not created with the external memory flag.");
+	return driver->buffer_get_allocation_size(buffer->driver_id);
+}
+
 #ifdef DEV_ENABLED
 void RenderingDevice::buffer_get_device_address_ranges(LocalVector<BufferAddressRange> &r_ranges) {
 	ERR_RENDER_THREAD_GUARD();
@@ -1847,6 +1873,10 @@ RID RenderingDevice::storage_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 				"The GPU doesn't support acceleration structure build input flag.");
 #endif
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	}
+	if (p_creation_bits.has_flag(BUFFER_CREATION_EXTERNAL_MEMORY_BIT)) {
+		ERR_FAIL_COND_V_MSG(p_creation_bits.has_flag(BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT), RID(), "An external memory buffer can't be dynamic persistent.");
+		buffer.usage.set_flag(RDD::BUFFER_USAGE_EXTERNAL_MEMORY_BIT);
 	}
 
 	buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
@@ -9560,6 +9590,8 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("buffer_get_data", "buffer", "offset_bytes", "size_bytes"), &RenderingDevice::buffer_get_data, DEFVAL(0), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("buffer_get_data_async", "buffer", "callback", "offset_bytes", "size_bytes"), &RenderingDevice::buffer_get_data_async, DEFVAL(0), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("buffer_get_device_address", "buffer"), &RenderingDevice::buffer_get_device_address);
+	ClassDB::bind_method(D_METHOD("buffer_get_external_memory_fd", "buffer"), &RenderingDevice::buffer_get_external_memory_fd);
+	ClassDB::bind_method(D_METHOD("buffer_get_external_memory_size", "buffer"), &RenderingDevice::buffer_get_external_memory_size);
 
 	ClassDB::bind_method(D_METHOD("render_pipeline_create", "shader", "framebuffer_format", "vertex_format", "primitive", "rasterization_state", "multisample_state", "stencil_state", "color_blend_state", "dynamic_state_flags", "for_render_pass", "specialization_constants"), &RenderingDevice::_render_pipeline_create, DEFVAL(0), DEFVAL(0), DEFVAL(TypedArray<RDPipelineSpecializationConstant>()));
 	ClassDB::bind_method(D_METHOD("render_pipeline_is_valid", "render_pipeline"), &RenderingDevice::render_pipeline_is_valid);
@@ -10037,6 +10069,7 @@ void RenderingDevice::_bind_methods() {
 	// Not exposed on purpose. This flag is too dangerous to be exposed to regular GD users.
 	//BIND_BITFIELD_FLAG(BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT);
 	BIND_BITFIELD_FLAG(BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	BIND_BITFIELD_FLAG(BUFFER_CREATION_EXTERNAL_MEMORY_BIT);
 
 	BIND_BITFIELD_FLAG(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT);
 	BIND_BITFIELD_FLAG(ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT);

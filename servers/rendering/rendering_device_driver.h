@@ -177,6 +177,8 @@ public:
 		BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT = (1 << 19),
 		BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT = (1 << 20),
 		// There are no Vulkan-equivalent. Try to use unused/unclaimed bits.
+		// A GPU buffer in its own allocation that another API (CUDA) can import, see buffer_get_external_memory_fd().
+		BUFFER_USAGE_EXTERNAL_MEMORY_BIT = (1 << 30),
 		BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT = (1 << 31),
 	};
 
@@ -203,6 +205,8 @@ public:
 	virtual void buffer_flush(BufferID p_buffer) {}
 	// Only for a buffer with BUFFER_USAGE_DEVICE_ADDRESS_BIT.
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) = 0;
+	// Only for a buffer with BUFFER_USAGE_EXTERNAL_MEMORY_BIT. A new file descriptor the caller owns, or -1.
+	virtual int buffer_get_external_memory_fd(BufferID p_buffer) { return -1; }
 
 	/*****************/
 	/**** TEXTURE ****/

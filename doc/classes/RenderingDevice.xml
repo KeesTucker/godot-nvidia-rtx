@@ -105,6 +105,20 @@
 				[b]Note:[/b] You must check that the GPU supports this functionality by calling [method has_feature] with [constant SUPPORTS_BUFFER_DEVICE_ADDRESS] as a parameter.
 			</description>
 		</method>
+		<method name="buffer_get_external_memory_fd">
+			<return type="int" />
+			<param index="0" name="buffer" type="RID" />
+			<description>
+				Returns a new file descriptor for the memory of [param buffer], which must have been created with [constant BUFFER_CREATION_EXTERNAL_MEMORY_BIT], or [code]-1[/code] on failure. The caller owns the descriptor. CUDA imports it with [code]cudaImportExternalMemory[/code] as an opaque file descriptor, with [code]cudaExternalMemoryDedicated[/code] set and the size from [method buffer_get_external_memory_size]. Only available with the Vulkan driver on Linux.
+			</description>
+		</method>
+		<method name="buffer_get_external_memory_size">
+			<return type="int" />
+			<param index="0" name="buffer" type="RID" />
+			<description>
+				Returns the size in bytes of the memory behind [param buffer], which must have been created with [constant BUFFER_CREATION_EXTERNAL_MEMORY_BIT]. It can be larger than the buffer, and an importer of [method buffer_get_external_memory_fd] must pass this size.
+			</description>
+		</method>
 		<method name="buffer_update">
 			<return type="int" enum="Error" />
 			<param index="0" name="buffer" type="RID" />
@@ -2382,6 +2396,9 @@
 			    storage_buffer = rd.storage_buffer_create(bytes.size(), bytes, RenderingDevice.BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)
 			[/gdscript]
 			[/codeblocks]
+		</constant>
+		<constant name="BUFFER_CREATION_EXTERNAL_MEMORY_BIT" value="16" enum="BufferCreationBits" is_bitfield="true">
+			Puts a storage buffer in a dedicated allocation that another API, such as CUDA, can import through [method buffer_get_external_memory_fd], so both work on the same VRAM with no copy. Such a buffer can't be mapped. The other API's work must be ordered against the device's by the caller, for example by finishing it before the next [method submit].
 		</constant>
 		<constant name="ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT" value="1" enum="AccelerationStructureFlagBits" is_bitfield="true" experimental="">
 			Allows the acceleration structure to be updated after it has been built.

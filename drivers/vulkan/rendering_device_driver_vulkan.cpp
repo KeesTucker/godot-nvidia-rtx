@@ -1677,6 +1677,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			device_functions.GetRayTracingShaderGroupHandlesKHR = PFN_vkGetRayTracingShaderGroupHandlesKHR(functions.GetDeviceProcAddr(vk_device, "vkGetRayTracingShaderGroupHandlesKHR"));
 			device_functions.CmdTraceRaysKHR = PFN_vkCmdTraceRaysKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdTraceRaysKHR"));
 		}
+
+		if (enabled_device_extension_names.has(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+			device_functions.GetMemoryFdKHR = PFN_vkGetMemoryFdKHR(functions.GetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
+		}
 	}
 
 	return OK;
@@ -2116,8 +2120,17 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	VkBufferCreateInfo create_info = {};
 	create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	create_info.size = p_size;
-	create_info.usage = p_usage & ~BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT;
+	create_info.usage = p_usage & ~(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT | BUFFER_USAGE_EXTERNAL_MEMORY_BIT);
 	create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	if (p_usage.has_flag(BUFFER_USAGE_EXTERNAL_MEMORY_BIT)) {
+		ERR_FAIL_COND_V_MSG(p_allocation_type != MEMORY_ALLOCATION_TYPE_GPU || p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT), BufferID(), "An external memory buffer must be a plain GPU buffer.");
+		BufferID buffer = _buffer_create_external(create_info);
+		if (buffer) {
+			((BufferInfo *)buffer.id)->size = original_size;
+		}
+		return buffer;
+	}
 
 	VmaMemoryUsage vma_usage = VMA_MEMORY_USAGE_UNKNOWN;
 	uint32_t vma_flags_to_remove = 0;
@@ -2210,6 +2223,85 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	return BufferID(buf_info);
 }
 
+// _buffer_create_external makes the buffer outside VMA, in a dedicated allocation of its own, so an exported file
+// descriptor covers exactly this buffer from offset 0. CUDA must import it with cudaExternalMemoryDedicated.
+RDD::BufferID RenderingDeviceDriverVulkan::_buffer_create_external(VkBufferCreateInfo &p_create_info) {
+	ERR_FAIL_NULL_V_MSG(device_functions.GetMemoryFdKHR, BufferID(), "External memory buffers need VK_KHR_external_memory_fd, which this device doesn't have.");
+
+	VkExternalMemoryBufferCreateInfo external_info = {};
+	external_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+	external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+	p_create_info.pNext = &external_info;
+
+	VkBuffer vk_buffer = VK_NULL_HANDLE;
+	VkResult err = vkCreateBuffer(vk_device, &p_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER), &vk_buffer);
+	ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't create external buffer of size: %d (VkResult error %d).", p_create_info.size, err));
+
+	VkMemoryRequirements requirements = {};
+	vkGetBufferMemoryRequirements(vk_device, vk_buffer, &requirements);
+	const VkPhysicalDeviceMemoryProperties *memory_properties = nullptr;
+	vmaGetMemoryProperties(allocator, &memory_properties);
+	uint32_t memory_type_index = UINT32_MAX;
+	for (uint32_t i = 0; i < memory_properties->memoryTypeCount; i++) {
+		const bool is_allowed = requirements.memoryTypeBits & (1u << i);
+		const bool is_device_local = memory_properties->memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		if (is_allowed && is_device_local) {
+			memory_type_index = i;
+			break;
+		}
+	}
+	if (memory_type_index == UINT32_MAX) {
+		vkDestroyBuffer(vk_device, vk_buffer, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER));
+		ERR_FAIL_V_MSG(BufferID(), "No device-local memory type can hold an external buffer.");
+	}
+
+	VkMemoryDedicatedAllocateInfo dedicated_info = {};
+	dedicated_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+	dedicated_info.buffer = vk_buffer;
+	VkExportMemoryAllocateInfo export_info = {};
+	export_info.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+	export_info.pNext = &dedicated_info;
+	export_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+	VkMemoryAllocateFlagsInfo flags_info = {};
+	flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+	flags_info.pNext = &export_info;
+	const bool has_device_address = p_create_info.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	if (has_device_address) {
+		flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+	}
+	VkMemoryAllocateInfo allocate_info = {};
+	allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocate_info.pNext = &flags_info;
+	allocate_info.allocationSize = requirements.size;
+	allocate_info.memoryTypeIndex = memory_type_index;
+
+	VkDeviceMemory memory = VK_NULL_HANDLE;
+	err = vkAllocateMemory(vk_device, &allocate_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DEVICE_MEMORY), &memory);
+	if (err) {
+		vkDestroyBuffer(vk_device, vk_buffer, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER));
+		ERR_FAIL_V_MSG(BufferID(), vformat("Can't allocate external memory of size: %d (VkResult error %d).", requirements.size, err));
+	}
+	err = vkBindBufferMemory(vk_device, vk_buffer, memory, 0);
+	if (err) {
+		vkDestroyBuffer(vk_device, vk_buffer, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER));
+		vkFreeMemory(vk_device, memory, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DEVICE_MEMORY));
+		ERR_FAIL_V_MSG(BufferID(), vformat("Can't bind external memory (VkResult error %d).", err));
+	}
+
+	BufferInfo *buf_info = VersatileResource::allocate<BufferInfo>(resources_allocator);
+	buf_info->vk_buffer = vk_buffer;
+	buf_info->external_memory = memory;
+	buf_info->allocation.size = requirements.size;
+	buf_info->size = p_create_info.size;
+	if (has_device_address) {
+		VkBufferDeviceAddressInfo address_info = {};
+		address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+		address_info.buffer = vk_buffer;
+		buf_info->device_address = vkGetBufferDeviceAddress(vk_device, &address_info);
+	}
+	return BufferID(buf_info);
+}
+
 bool RenderingDeviceDriverVulkan::buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) {
 	BufferInfo *buf_info = (BufferInfo *)p_buffer.id;
 
@@ -2237,7 +2329,10 @@ void RenderingDeviceDriverVulkan::buffer_free(BufferID p_buffer) {
 		vmaUnmapMemory(allocator, buf_info->allocation.handle);
 	}
 
-	if (!Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled()) {
+	if (buf_info->external_memory) {
+		vkDestroyBuffer(vk_device, buf_info->vk_buffer, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER));
+		vkFreeMemory(vk_device, buf_info->external_memory, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DEVICE_MEMORY));
+	} else if (!Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled()) {
 		vmaDestroyBuffer(allocator, buf_info->vk_buffer, buf_info->allocation.handle);
 	} else {
 		vkDestroyBuffer(vk_device, buf_info->vk_buffer, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER));
@@ -2259,6 +2354,7 @@ uint64_t RenderingDeviceDriverVulkan::buffer_get_allocation_size(BufferID p_buff
 uint8_t *RenderingDeviceDriverVulkan::buffer_map(BufferID p_buffer) {
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
 	ERR_FAIL_COND_V_MSG(buf_info->is_dynamic(), nullptr, "Buffer must NOT have BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT. Use buffer_persistent_map_advance() instead.");
+	ERR_FAIL_COND_V_MSG(buf_info->external_memory, nullptr, "An external memory buffer lives in VRAM and can't be mapped.");
 	void *data_ptr = nullptr;
 	VkResult err = vmaMapMemory(allocator, buf_info->allocation.handle, &data_ptr);
 	ERR_FAIL_COND_V_MSG(err, nullptr, vformat("Couldn't map buffer memory (VkResult error %d).", err));
@@ -2323,6 +2419,19 @@ uint64_t RenderingDeviceDriverVulkan::buffer_get_device_address(BufferID p_buffe
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
 	DEV_ASSERT(buf_info->device_address != 0 && "Buffer was not created with BUFFER_USAGE_DEVICE_ADDRESS_BIT.");
 	return buf_info->device_address;
+}
+
+int RenderingDeviceDriverVulkan::buffer_get_external_memory_fd(BufferID p_buffer) {
+	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
+	ERR_FAIL_COND_V_MSG(!buf_info->external_memory, -1, "Buffer was not created with BUFFER_USAGE_EXTERNAL_MEMORY_BIT.");
+	VkMemoryGetFdInfoKHR get_fd_info = {};
+	get_fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+	get_fd_info.memory = buf_info->external_memory;
+	get_fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+	int fd = -1;
+	VkResult err = device_functions.GetMemoryFdKHR(vk_device, &get_fd_info, &fd);
+	ERR_FAIL_COND_V_MSG(err, -1, vformat("Can't export the buffer's memory (VkResult error %d).", err));
+	return fd;
 }
 
 /*****************/

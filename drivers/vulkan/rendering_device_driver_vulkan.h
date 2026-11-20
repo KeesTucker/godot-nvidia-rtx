@@ -143,6 +143,9 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		PFN_vkCreateRayTracingPipelinesKHR CreateRaytracingPipelinesKHR = nullptr;
 		PFN_vkGetRayTracingShaderGroupHandlesKHR GetRayTracingShaderGroupHandlesKHR = nullptr;
 		PFN_vkCmdTraceRaysKHR CmdTraceRaysKHR = nullptr;
+
+		// External memory, for buffers CUDA imports.
+		PFN_vkGetMemoryFdKHR GetMemoryFdKHR = nullptr;
 	};
 	// Debug marker extensions.
 	VkDebugReportObjectTypeEXT _convert_to_debug_report_objectType(VkObjectType p_object_type);
@@ -254,6 +257,8 @@ public:
 		uint64_t size = 0;
 		VkDeviceAddress device_address = 0; // 0 unless created with BUFFER_USAGE_DEVICE_ADDRESS_BIT.
 		VkBufferView vk_view = VK_NULL_HANDLE; // For texel buffers.
+		// External buffers bypass VMA, so their memory is here and allocation.handle is null.
+		VkDeviceMemory external_memory = VK_NULL_HANDLE;
 		// If dynamic buffer, then its range is [0; RenderingDeviceDriverVulkan::frame_count)
 		// else it's UINT32_MAX.
 		uint32_t frame_idx = UINT32_MAX;
@@ -279,7 +284,12 @@ public:
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
 	virtual void buffer_flush(BufferID p_buffer) override final;
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override final;
+	virtual int buffer_get_external_memory_fd(BufferID p_buffer) override final;
 
+private:
+	BufferID _buffer_create_external(VkBufferCreateInfo &p_create_info);
+
+public:
 	/*****************/
 	/**** TEXTURE ****/
 	/*****************/
