@@ -499,17 +499,24 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		RaygenPushConstant raygen_push = {};
 		RD::get_singleton()->raytracing_list_set_push_constant(raytracing_list, &raygen_push, sizeof(RaygenPushConstant));
 		RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), rt_size.width, rt_size.height, 1);
+		RD::get_singleton()->raytracing_list_end();
 
+		// A list of its own, so its timestamp times it apart from the path tracer's.
 		const RID raster_overlay_depth_uniform_set = raytracing->get_raster_overlay_depth_uniform_set(rt_state);
 		if (raster_overlay_depth_uniform_set.is_valid()) {
 			RENDER_TIMESTAMP("Raster Overlay Depth");
-			RD::get_singleton()->raytracing_list_bind_uniform_set(raytracing_list, raster_overlay_depth_uniform_set, 0);
+			RD::RaytracingListID overlay_depth_list = RD::get_singleton()->raytracing_list_begin();
+			RD::get_singleton()->raytracing_list_bind_raytracing_pipeline(overlay_depth_list, rt_pipeline);
+			RD::get_singleton()->raytracing_list_bind_uniform_set(overlay_depth_list, raster_overlay_depth_uniform_set, 0);
+			if (bindless_set.is_valid()) {
+				RD::get_singleton()->raytracing_list_bind_uniform_set(overlay_depth_list, bindless_set, 1);
+			}
 			raygen_push.is_raster_overlay_depth_pass = 1;
-			RD::get_singleton()->raytracing_list_set_push_constant(raytracing_list, &raygen_push, sizeof(RaygenPushConstant));
+			RD::get_singleton()->raytracing_list_set_push_constant(overlay_depth_list, &raygen_push, sizeof(RaygenPushConstant));
 			const Size2i overlay_depth_size = rb->get_target_size();
-			RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), overlay_depth_size.width, overlay_depth_size.height, 1);
+			RD::get_singleton()->raytracing_list_trace_rays(overlay_depth_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), overlay_depth_size.width, overlay_depth_size.height, 1);
+			RD::get_singleton()->raytracing_list_end();
 		}
-		RD::get_singleton()->raytracing_list_end();
 
 		RD::get_singleton()->draw_command_end_label();
 
