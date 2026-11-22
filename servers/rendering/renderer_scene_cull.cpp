@@ -3333,7 +3333,8 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 			// Prefer the parent: exclude the child from RT until the parent becomes
 			// HIDDEN_CLOSE_RANGE (fully faded out), matching the point where raster
 			// switches over. In-frustum children are subject to the same rule.
-			if (cull_data.cull->rt_enabled && (idata.layer_mask & ((1 << 20) - 1))) {
+			const bool is_raster_overlay = (idata.layer_mask & cull_data.cull->rt_raster_overlay_layers) != 0;
+			if (cull_data.cull->rt_enabled && !is_raster_overlay && (idata.layer_mask & ((1 << 20) - 1))) {
 				// For off-frustum instances, also run LAYER_CHECK and VIS_CHECK to match raster gating.
 				bool rt_in_range = in_frustum || (LAYER_CHECK && cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->rt_aabb) && VIS_CHECK);
 				if (rt_in_range) {
@@ -3485,6 +3486,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		float z_far = p_camera_data->main_projection.get_z_far();
 		Vector3 cam_origin = p_camera_data->main_transform.origin;
 		cull.rt_aabb = AABB(cam_origin - Vector3(z_far, z_far, z_far), Vector3(z_far, z_far, z_far) * 2.0);
+		cull.rt_raster_overlay_layers = uint32_t(int(GLOBAL_GET_CACHED(int, "rendering/pathtracing/raster_overlay_layers")));
 	}
 
 	Vector<RID> directional_lights;

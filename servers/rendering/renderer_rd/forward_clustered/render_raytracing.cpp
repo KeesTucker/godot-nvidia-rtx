@@ -599,6 +599,9 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	if (p_state->scene_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->scene_uniform_set)) {
 		RD::get_singleton()->free_rid(p_state->scene_uniform_set);
 	}
+	if (p_state->raster_overlay_depth_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->raster_overlay_depth_uniform_set)) {
+		RD::get_singleton()->free_rid(p_state->raster_overlay_depth_uniform_set);
+	}
 	if (p_state->fog_shadows_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->fog_shadows_uniform_set)) {
 		RD::get_singleton()->free_rid(p_state->fog_shadows_uniform_set);
 	}
@@ -663,6 +666,29 @@ bool RenderRaytracing::rt_has_depth_texture(RenderSceneBuffersRD *p_render_buffe
 RID RenderRaytracing::rt_get_depth_texture(RenderSceneBuffersRD *p_render_buffers) const {
 	ERR_FAIL_NULL_V(p_render_buffers, RID());
 	return p_render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_DEPTH);
+}
+
+void RenderRaytracing::rt_set_raster_overlay_depth_size(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_size) {
+	ERR_FAIL_NULL(p_render_buffers);
+	const bool has_texture = p_render_buffers->has_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH);
+	const bool is_size_changed = has_texture && Size2i(p_render_buffers->get_texture_format(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH).width, p_render_buffers->get_texture_format(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH).height) != p_size;
+	if (is_size_changed || (has_texture && p_size == Size2i())) {
+		p_render_buffers->clear_context(RB_SCOPE_RT_RASTER_OVERLAY);
+	}
+	const bool needs_texture = p_size != Size2i() && !p_render_buffers->has_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH);
+	if (needs_texture) {
+		const uint32_t usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+		p_render_buffers->create_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH, RD::DATA_FORMAT_R32_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1, p_size);
+	}
+}
+
+bool RenderRaytracing::rt_has_raster_overlay_depth_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	return p_render_buffers && p_render_buffers->has_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH);
+}
+
+RID RenderRaytracing::rt_get_raster_overlay_depth_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_NULL_V(p_render_buffers, RID());
+	return p_render_buffers->get_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH);
 }
 
 void RenderRaytracing::rt_ensure_sky_texture(RenderSceneBuffersRD *p_render_buffers) {
@@ -3328,8 +3354,22 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	};
 	mat.inside_medium = get_medium("rt_medium");
 	mat.outside_medium = get_medium("rt_outside_medium");
-	if (mat.inside_medium != 0u) {
+	// A thin slab (`uniform int rt_slab_medium` and `uniform float rt_slab_thickness_m`) stands for a whole
+	// flat pane of that medium between the two, so a tank's wall costs one hit, not two. Air on both sides is
+	// fine: it still reflects and tints.
+	mat.slab_medium = get_medium("rt_slab_medium");
+	mat.slab_thickness_m = MAX(get_float("rt_slab_thickness_m", 0.0f), 0.0f);
+	const bool is_thin_slab = mat.slab_medium != 0u && mat.slab_thickness_m > 0.0f;
+	if (mat.inside_medium != 0u || is_thin_slab) {
 		mat.flags |= RT_MAT_FLAG_DIELECTRIC;
+	}
+	if (is_thin_slab) {
+		mat.flags |= RT_MAT_FLAG_THIN_SLAB;
+		const Variant shifts_ray = material_storage->material_get_param(p_material_rid, "rt_slab_shifts_ray");
+		const bool is_shifting_ray = shifts_ray.get_type() != Variant::BOOL || bool(shifts_ray);
+		if (is_shifting_ray) {
+			mat.flags |= RT_MAT_FLAG_SLAB_SHIFTS_RAY;
+		}
 	}
 	// The rasterizer's clear coat is fixed at 1.5, a varnish. A shader declares
 	// `uniform float rt_clearcoat_index_of_refraction` for anything else, like
@@ -6171,6 +6211,21 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		p_state->scene_uniform_set = result;
 		if (result.is_valid()) {
 			RD::get_singleton()->set_resource_name(result, "RT Scene Uniform Set");
+		}
+
+		if (p_state->raster_overlay_depth_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->raster_overlay_depth_uniform_set)) {
+			RD::get_singleton()->free_rid(p_state->raster_overlay_depth_uniform_set);
+		}
+		p_state->raster_overlay_depth_uniform_set = RID();
+		if (rt_has_raster_overlay_depth_texture(rb)) {
+			Vector<RD::Uniform> overlay_uniforms = uniforms;
+			for (RD::Uniform &uniform : overlay_uniforms) {
+				if (uniform.binding == 15) {
+					uniform.clear_ids();
+					uniform.append_id(rt_get_raster_overlay_depth_texture(rb));
+				}
+			}
+			p_state->raster_overlay_depth_uniform_set = RD::get_singleton()->uniform_set_create(overlay_uniforms, shader_rd, RenderForwardClustered::SCENE_UNIFORM_SET, /*p_linear_pool=*/true);
 		}
 
 		// === SET 1: Bindless textures ===

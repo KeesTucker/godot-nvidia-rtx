@@ -3880,6 +3880,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_range", PROPERTY_HINT_RANGE, "0,10000,0.1,or_greater,suffix:m"), 0.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_fade", PROPERTY_HINT_RANGE, "0,1000,0.1,or_greater,suffix:m"), 0.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_dominant_layer_alpha", PROPERTY_HINT_RANGE, "0,1,0.01"), 0.5);
+	// Instances on these layers skip the path tracer and are rasterized over the upscaled frame, depth tested
+	// against the traced depth. Small fast things the denoiser smears, like particles, go here.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/raster_overlay_layers", PROPERTY_HINT_LAYERS_3D_RENDER), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/volumetric_fog_positional_shadow_rays", PROPERTY_HINT_RANGE, "1,4,1"), 2);
 	GLOBAL_DEF("rendering/pathtracing/volumetric_fog_shadows", true);
 	// Decal budget; 0 compiles decals out of the RT pipeline. Changing between 0 and non-zero swaps pipelines.

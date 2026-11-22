@@ -97,6 +97,8 @@ struct InstanceMotionData {
 #define RT_MAT_FLAG_UV2_TRIPLANAR_WORLD 65536u
 #define RT_MAT_FLAG_INSTANCE_FADE 131072u
 #define RT_MAT_FLAG_DIELECTRIC 262144u
+#define RT_MAT_FLAG_THIN_SLAB 524288u
+#define RT_MAT_FLAG_SLAB_SHIFTS_RAY 1048576u
 
 // Multi-bit fields fill the top bits so new single-bit flags can grow upward.
 // Blend class of transparent surfaces (bits 25-27). Opaque surfaces leave 0.
@@ -159,7 +161,11 @@ struct MaterialData {
 	// The clear coat's index of refraction (`uniform float rt_clearcoat_index_of_refraction`),
 	// 1.5 unless the shader says otherwise.
 	float clearcoat_index_of_refraction;
-	uint medium_padding;
+	// A RT_MAT_FLAG_THIN_SLAB surface stands for a flat pane this thick of this medium, between
+	// inside_medium and outside_medium: one hit for both its faces.
+	uint slab_medium;
+	float slab_thickness_m;
+	uint slab_padding[3]; // std430 rounds the struct up to 16 bytes.
 };
 
 // Bindless index of a MaterialData *_texture.

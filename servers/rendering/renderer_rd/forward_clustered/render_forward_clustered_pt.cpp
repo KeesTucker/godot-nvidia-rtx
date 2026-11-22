@@ -99,6 +99,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
+#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -232,7 +233,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	} else {
 		// TLAS is built from rt_instances and the path tracer writes velocity itself,
 		// so this collapses to populating the ALPHA (transparent) list only.
-		_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, false, false, false, false, true);
+		_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, false, false, false, false, true, UINT32_MAX, _get_raster_overlay_layers());
 
 		int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 
@@ -268,6 +269,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		} else if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
 			raytracing->dlss_rr_free_buffers(rb.ptr());
 		}
+		// The depth only launch walks with the DLSS-RR guide rays, so it's there only with them.
+		const bool needs_raster_overlay_depth = dlss_rr_enabled && using_upscaling && _get_raster_overlay_layers() != 0;
+		raytracing->rt_set_raster_overlay_depth_size(rb.ptr(), needs_raster_overlay_depth ? rb->get_target_size() : Size2i());
 
 		// The uniform set is built here, ahead of the sky block, so the sky texture
 		// has to exist by now even though it is drawn into later this frame. Only
@@ -492,7 +496,19 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 		// Raytracing dispatches at internal (pre-upscale) size
 		Size2i rt_size = rb->get_internal_size();
+		RaygenPushConstant raygen_push = {};
+		RD::get_singleton()->raytracing_list_set_push_constant(raytracing_list, &raygen_push, sizeof(RaygenPushConstant));
 		RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), rt_size.width, rt_size.height, 1);
+
+		const RID raster_overlay_depth_uniform_set = raytracing->get_raster_overlay_depth_uniform_set(rt_state);
+		if (raster_overlay_depth_uniform_set.is_valid()) {
+			RENDER_TIMESTAMP("Raster Overlay Depth");
+			RD::get_singleton()->raytracing_list_bind_uniform_set(raytracing_list, raster_overlay_depth_uniform_set, 0);
+			raygen_push.is_raster_overlay_depth_pass = 1;
+			RD::get_singleton()->raytracing_list_set_push_constant(raytracing_list, &raygen_push, sizeof(RaygenPushConstant));
+			const Size2i overlay_depth_size = rb->get_target_size();
+			RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), overlay_depth_size.width, overlay_depth_size.height, 1);
+		}
 		RD::get_singleton()->raytracing_list_end();
 
 		RD::get_singleton()->draw_command_end_label();
@@ -632,6 +648,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		_render_3d_upscaling(p_render_data, scale_type, using_taa, time_step, dlss_rr_guides);
 	}
 
+	if (rb_data.is_valid() && raytracing && raytracing->rt_has_depth_texture(rb.ptr())) {
+		const bool draws_on_upscaled = using_upscaling && rb->has_upscaled_texture();
+		_render_raster_overlay(p_render_data, p_default_bg_color, draws_on_upscaled, reverse_cull, base_specialization);
+	}
+
 	_debug_draw_cluster(rb);
 
 	RENDER_TIMESTAMP("Tonemap");
@@ -651,6 +672,82 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	}
 
 	_render_buffers_debug_draw(p_render_data);
+}
+
+#define RB_SCOPE_RASTER_OVERLAY SNAME("raster_overlay")
+#define RB_TEX_RASTER_OVERLAY_DEPTH SNAME("depth")
+
+uint32_t RenderForwardClusteredPT::_get_raster_overlay_layers() {
+	return uint32_t(int(GLOBAL_GET_CACHED(int, "rendering/pathtracing/raster_overlay_layers")));
+}
+
+// _render_raster_overlay rasterizes the raster overlay layers over the upscaled frame, before tone mapping.
+// They never reach the denoiser, so nothing smears behind them. The traced depth is the apparent depth of
+// what the camera sees, through glass and water too, so it occludes them right. The overlay projects
+// unjittered, as the upscaled frame has no jitter.
+void RenderForwardClusteredPT::_render_raster_overlay(RenderDataRD *p_render_data, const Color &p_default_bg_color, bool p_draws_on_upscaled, bool p_reverse_cull, const SceneShaderForwardClustered::ShaderSpecialization &p_base_specialization) {
+	const uint32_t overlay_layers = _get_raster_overlay_layers();
+	if (overlay_layers == 0 || p_render_data->scene_data->view_count != 1) {
+		return;
+	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, false, false, false, false, false, overlay_layers);
+	const bool has_overlay_surfaces = !render_list[RENDER_LIST_OPAQUE].elements.is_empty() || !render_list[RENDER_LIST_ALPHA].elements.is_empty();
+	if (!has_overlay_surfaces) {
+		return;
+	}
+	render_list[RENDER_LIST_OPAQUE].sort_by_key();
+	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+	_fill_instance_data(RENDER_LIST_OPAQUE);
+	_fill_instance_data(RENDER_LIST_ALPHA);
+	_update_dirty_geometry_pipelines();
+
+	RENDER_TIMESTAMP("Raster Overlay");
+	RD::get_singleton()->draw_command_begin_label("Raster Overlay");
+
+	const Size2i output_size = p_draws_on_upscaled ? rb->get_target_size() : rb->get_internal_size();
+	if (rb->has_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH) && rb->get_texture_format(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH).width != uint32_t(output_size.width)) {
+		rb->clear_context(RB_SCOPE_RASTER_OVERLAY);
+	}
+	if (!rb->has_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH)) {
+		rb->create_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH, RD::DATA_FORMAT_D32_SFLOAT, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_1, output_size);
+	}
+	const RID depth = rb->get_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH);
+	const RID color = p_draws_on_upscaled ? rb->get_upscaled_texture() : rb->get_internal_texture();
+	// The depth traced at the output size has every blade's edge exact. Without it (no DLSS-RR), the
+	// internal size depth is stretched, nearest sampled.
+	const bool has_full_size_depth = p_draws_on_upscaled && raytracing->rt_has_raster_overlay_depth_texture(rb.ptr());
+	const RID traced_depth = has_full_size_depth ? raytracing->rt_get_raster_overlay_depth_texture(rb.ptr()) : raytracing->rt_get_depth_texture(rb.ptr());
+	copy_effects->copy_r32f_to_depth_fb(traced_depth, FramebufferCacheRD::get_singleton()->get_cache(depth), Rect2i(Point2i(), output_size));
+
+	RenderSceneDataRD *scene_data = p_render_data->scene_data;
+	const Vector2 taa_jitter = scene_data->taa_jitter;
+	scene_data->taa_jitter = Vector2();
+	const uint32_t uniform_buffer_index = _setup_environment(p_render_data, false, output_size, output_size, p_default_bg_color, false);
+	scene_data->taa_jitter = taa_jitter;
+
+	const RID framebuffer = FramebufferCacheRD::get_singleton()->get_cache(color, depth);
+	const bool is_wireframe = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME;
+	const RenderListType lists[] = { RENDER_LIST_OPAQUE, RENDER_LIST_ALPHA };
+	for (const RenderListType list : lists) {
+		if (render_list[list].elements.is_empty()) {
+			continue;
+		}
+		// Each list's instance data sits in its own buffer, bound by its own render pass set.
+		const RID rp_uniform_set = _setup_render_pass_uniform_set(list, p_render_data, RID(), rb->get_samplers(), uniform_buffer_index, true);
+		if (list == RENDER_LIST_OPAQUE) {
+			// The opaque colour pass only draws where depth is EQUAL to a pre-pass's, so lay one first.
+			RenderListParameters depth_params(render_list[list].elements.ptr(), render_list[list].element_info.ptr(), render_list[list].elements.size(), p_reverse_cull, PASS_MODE_DEPTH, 0, false, p_render_data->directional_light_soft_shadows, rp_uniform_set, is_wireframe, Vector2(), scene_data->lod_distance_multiplier, scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization);
+			_render_list_with_draw_list(&depth_params, FramebufferCacheRD::get_singleton()->get_cache(depth), RD::DRAW_DEFAULT_ALL);
+		}
+		const uint32_t color_pass_flags = list == RENDER_LIST_ALPHA ? uint32_t(COLOR_PASS_FLAG_TRANSPARENT) : 0u;
+		RenderListParameters params(render_list[list].elements.ptr(), render_list[list].element_info.ptr(), render_list[list].elements.size(), p_reverse_cull, PASS_MODE_COLOR, color_pass_flags, false, p_render_data->directional_light_soft_shadows, rp_uniform_set, is_wireframe, Vector2(), scene_data->lod_distance_multiplier, scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization);
+		_render_list_with_draw_list(&params, framebuffer, RD::DRAW_DEFAULT_ALL);
+	}
+
+	RD::get_singleton()->draw_command_end_label();
 }
 
 // Raytracing methods

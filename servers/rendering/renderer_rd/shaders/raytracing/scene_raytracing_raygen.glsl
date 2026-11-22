@@ -45,6 +45,16 @@ layout(set = 0, binding = 30) uniform texture2D prepass_color_texture;
 
 layout(location = 0) rayPayloadEXT PathPayload payload;
 
+// RaygenPushConstant picks what a launch does: the path trace, or the raster overlay's full resolution
+// depth (rt_depth_image is then that depth).
+layout(push_constant, std430) uniform RaygenPushConstant {
+	uint is_raster_overlay_depth_pass;
+	uint pad_0;
+	uint pad_1;
+	uint pad_2;
+}
+raygen_push;
+
 struct ContinuationReservoir {
 	PathState selected;
 	float selected_weight;
@@ -95,6 +105,18 @@ bool russian_roulette_survives(uint p_next_bounce, inout PathState ps) {
 	return true;
 }
 
+// get_next_ray_origin is where a ray carries on from a hit: just off the surface, or where light that went under
+// it or through a thin pane came out.
+vec3 get_next_ray_origin(vec3 p_hit_pos, PathState p_state) {
+	bool left_somewhere_else = p_state.exit_shift_m > 0.0;
+	return left_somewhere_else ? p_hit_pos + p_state.offset_normal * p_state.exit_shift_m : offset_ray_origin(p_hit_pos, p_state.offset_normal);
+}
+
+// rt_camera_medium is the medium the camera sits in: air unless the project says otherwise (rt_camera_medium).
+uint rt_camera_medium() {
+	return uint(clamp(rt_medium_global(rt_caustics.w, vec4(0.0)).x, 0.0, float(RT_MEDIA_COUNT - 1)) + 0.5);
+}
+
 #ifdef DLSS_RR_ENABLED
 // Maximum number of mirrors followed, including the primary one.
 #define DLSS_RR_REPLACEMENT_MAX_MIRRORS 2u
@@ -117,6 +139,7 @@ void dlss_rr_replace_primary_surface(vec3 p_origin, vec3 p_dir, float p_hit_t) {
 	gs.offset_normal = vec3(0.0, 0.0, 1.0);
 	gs.next_ray_dir = vec3(0.0, 0.0, 1.0);
 	gs.medium = 0u;
+	gs.exit_shift_m = 0.0;
 	for (uint mirrors = 1u; mirrors <= DLSS_RR_REPLACEMENT_MAX_MIRRORS; mirrors++) {
 		// One bounce and no SAMPLE_ZERO keep the primary depth/velocity/guide writes away.
 		gs.packed_bounces_flags = inc_total_bounce(0u) | GUIDE_RAY_FLAG |
@@ -138,7 +161,7 @@ void dlss_rr_replace_primary_surface(vec3 p_origin, vec3 p_dir, float p_hit_t) {
 			}
 			mirror_throughput *= hit_specular;
 			image_xform = image_xform * dlss_rr_householder(normalize(mirror_axis));
-			ray_origin = offset_ray_origin(ray_origin + ray_dir * result.hit_t, result.offset_normal);
+			ray_origin = get_next_ray_origin(ray_origin + ray_dir * result.hit_t, result);
 			ray_dir = result.next_ray_dir;
 			continue;
 		}
@@ -152,17 +175,39 @@ void dlss_rr_replace_primary_surface(vec3 p_origin, vec3 p_dir, float p_hit_t) {
 // Glass, a water surface, and the mirrors and total internal reflections a ray meets through them.
 #define DLSS_RR_TRANSMISSION_MAX_SMOOTH_HITS 6u
 
+// dlss_rr_apparent_length is how far a stretch of a ray through p_medium looks from the camera. Through flat
+// layers a point sits where the camera ray, carried on straight, meets the layers' normal through it: each
+// stretch shrinks by the camera's index over its own, at any angle. Water seen from air is a quarter
+// shallower than the ray's length; at the ray's length the motion vectors swung the floor 4/3 too far on
+// every camera move, and Ray Reconstruction smeared it.
+float dlss_rr_apparent_length(float p_length, uint p_medium) {
+	return p_length * rt_medium_index_of_refraction(rt_camera_medium()) / rt_medium_index_of_refraction(p_medium);
+}
+
 // dlss_rr_replace_through_primary_dielectric gives a primary glass or water hit the guides of the
 // surface seen through it: its depth, motion, normal, roughness and albedos. A guide ray walks from
 // the camera, refracting through dielectrics and reflecting off mirrors, to the first other surface.
-// The guides go at its apparent position, as far along the camera ray as the walk was long, with
-// its motion mapped through the mirrors. Refraction bends the walk, so camera motion through tilted
-// or rippled interfaces is close but not exact.
-void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
+// The guides go at its apparent position, as far along the camera ray as the walk looks
+// (dlss_rr_apparent_length), with its motion mapped through the mirrors. That's exact for flat
+// layers; tilted or rippled interfaces make it close.
+struct SmoothHitWalk {
+	bool has_missed; // Nothing past the smooth hits.
+	bool has_reached; // Stopped at a surface, whose guide result is in result and the payload.
+	PathState result;
+	float scene_length; // How far along the camera ray the surface looks (dlss_rr_apparent_length).
+	mat3 image_xform; // World to the image space of the mirrors along the walk.
+};
+
+// dlss_rr_walk_through_smooth_hits walks a guide ray from p_origin, refracting through dielectrics and
+// reflecting off mirrors, to the first other surface.
+SmoothHitWalk dlss_rr_walk_through_smooth_hits(vec3 p_origin, vec3 p_dir) {
+	SmoothHitWalk walk;
+	walk.has_missed = false;
+	walk.has_reached = false;
+	walk.scene_length = 0.0;
+	walk.image_xform = mat3(1.0);
 	vec3 ray_origin = p_origin;
 	vec3 ray_dir = p_dir;
-	float scene_length = 0.0;
-	mat3 image_xform = mat3(1.0); // World to the image space of the mirrors along the walk.
 
 	PathState gs;
 	gs.radiance = vec3(0.0);
@@ -170,7 +215,8 @@ void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
 	gs.rng_state = 0u;
 	gs.offset_normal = vec3(0.0, 0.0, 1.0);
 	gs.next_ray_dir = vec3(0.0, 0.0, 1.0);
-	gs.medium = 0u;
+	gs.medium = rt_camera_medium();
+	gs.exit_shift_m = 0.0;
 	for (uint smooth_hits = 1u; smooth_hits <= DLSS_RR_TRANSMISSION_MAX_SMOOTH_HITS; smooth_hits++) {
 		// One bounce and no SAMPLE_ZERO keep the primary depth/velocity/guide writes away.
 		gs.packed_bounces_flags = inc_total_bounce(0u) | GUIDE_RAY_FLAG |
@@ -178,42 +224,83 @@ void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
 		gs.hit_t = -1.0;
 		path_pack(payload, gs);
 		traceRayEXT(tlas, RT_RAY_FLAGS, RT_VIS_MASK, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
-		if (payload.hit_t < 0.0 || (payload.packed_bounces_flags & GUIDE_RESULT_FLAG) == 0u) {
-			return;
+		if (payload.hit_t < 0.0) {
+			walk.has_missed = true;
+			return walk;
+		}
+		if ((payload.packed_bounces_flags & GUIDE_RESULT_FLAG) == 0u) {
+			return walk;
 		}
 		PathState result = path_unpack(payload);
-		scene_length += result.hit_t;
+		walk.scene_length += dlss_rr_apparent_length(result.hit_t, gs.medium);
 		if ((result.packed_bounces_flags & GUIDE_MIRROR_FLAG) != 0u) {
 			// offset_normal is on the side the walk goes on: the far side when it went through.
 			bool went_through = dot(ray_dir, result.offset_normal) > 0.0;
 			vec3 mirror_axis = ray_dir - result.next_ray_dir;
 			if (!went_through && dot(mirror_axis, mirror_axis) > 1e-10) {
-				image_xform = image_xform * dlss_rr_householder(normalize(mirror_axis));
+				walk.image_xform = walk.image_xform * dlss_rr_householder(normalize(mirror_axis));
 			}
-			ray_origin = offset_ray_origin(ray_origin + ray_dir * result.hit_t, result.offset_normal);
+			ray_origin = get_next_ray_origin(ray_origin + ray_dir * result.hit_t, result);
 			ray_dir = result.next_ray_dir;
+			gs.medium = result.medium;
 			continue;
 		}
+		walk.has_reached = true;
+		walk.result = result;
+		return walk;
+	}
+	return walk;
+}
 
-		ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
-		vec3 apparent_pos = p_origin + p_dir * scene_length;
-		vec3 motion = vec3(unpackHalf2x16(payload.packed_rt[0]), unpackHalf2x16(payload.packed_rt[1]).x);
-		float roughness = unpackHalf2x16(payload.packed_rt[1]).y;
-		vec2 mv = rt_motion_vector(apparent_pos, apparent_pos + image_xform * motion);
-		imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
-		dlss_rr_write_specular_motion_vector(mv);
-		imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
-		imageStore(dlss_rr_normal_roughness, pixel, vec4(image_xform * result.next_ray_dir, roughness));
-		dlss_rr_write_albedo_guides(unpackUnorm4x8(payload.packed_rt[2]).rgb, unpackUnorm4x8(payload.rng_state).rgb);
+void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
+	ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+	SmoothHitWalk walk = dlss_rr_walk_through_smooth_hits(p_origin, p_dir);
+	if (walk.has_missed) {
+		// Nothing behind the glass: far, as a primary miss.
+		imageStore(rt_depth_image, pixel, vec4(0.0));
 		return;
 	}
+	if (!walk.has_reached) {
+		return;
+	}
+	vec3 apparent_pos = p_origin + p_dir * walk.scene_length;
+	vec3 motion = vec3(unpackHalf2x16(payload.packed_rt[0]), unpackHalf2x16(payload.packed_rt[1]).x);
+	float roughness = unpackHalf2x16(payload.packed_rt[1]).y;
+	vec2 mv = rt_motion_vector(apparent_pos, apparent_pos + walk.image_xform * motion);
+	imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
+	dlss_rr_write_specular_motion_vector(mv);
+	imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
+	imageStore(dlss_rr_normal_roughness, pixel, vec4(walk.image_xform * walk.result.next_ray_dir, roughness));
+	dlss_rr_write_albedo_guides(unpackUnorm4x8(payload.packed_rt[2]).rgb, unpackUnorm4x8(payload.rng_state).rgb);
+}
+
+// trace_raster_overlay_depth writes the apparent depth of this output pixel's unjittered camera ray, through
+// glass and water, for the raster overlay to test against at full resolution. Writes nothing else.
+void trace_raster_overlay_depth() {
+	vec2 pixel_center = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+	// The scene's projection is jittered: an unjittered ndc d sits at d + jitter in it.
+	vec2 jittered_ndc = pixel_center / vec2(gl_LaunchSizeEXT.xy) * 2.0 - 1.0 + scene_data_block.data.taa_jitter;
+	mat4 inv_view = transpose(mat4(scene_data_block.data.inv_view_matrix[0],
+			scene_data_block.data.inv_view_matrix[1],
+			scene_data_block.data.inv_view_matrix[2],
+			vec4(0.0, 0.0, 0.0, 1.0)));
+	const bool is_orthogonal = scene_data_block.data.projection_matrix[3][3] != 0.0;
+	vec4 target = scene_data_block.data.inv_projection_matrix * vec4(jittered_ndc, 1.0, 1.0);
+	vec3 view_origin = is_orthogonal ? vec3(target.xy / target.w, 0.0) : vec3(0.0);
+	vec3 view_direction = is_orthogonal ? vec3(0.0, 0.0, -1.0) : normalize(target.xyz);
+	vec3 origin = (inv_view * vec4(view_origin, 1.0)).xyz;
+	vec3 direction = (inv_view * vec4(view_direction, 0.0)).xyz;
+
+	SmoothHitWalk walk = dlss_rr_walk_through_smooth_hits(origin, direction);
+	float ndc_depth = walk.has_reached ? rt_ndc_depth(origin + direction * walk.scene_length) : 0.0;
+	imageStore(rt_depth_image, ivec2(gl_LaunchIDEXT.xy), vec4(ndc_depth));
 }
 
 // dlss_rr_finish_transmitted_guides finishes the guides of a surface the path itself reached
 // straight through the primary glass or water, which saves the walk above. The hit wrote its
 // albedos, normal and roughness, and left its world motion in the velocity (xy) and depth (z)
 // images. Those become the motion vector and depth of its apparent position: as far along the
-// camera ray as the path was long.
+// camera ray as the path looks (dlss_rr_apparent_length).
 void dlss_rr_finish_transmitted_guides(vec3 p_origin, vec3 p_dir, float p_scene_length) {
 	ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
 	vec3 motion = vec3(imageLoad(rt_velocity_image, pixel).xy, imageLoad(rt_depth_image, pixel).x);
@@ -226,6 +313,12 @@ void dlss_rr_finish_transmitted_guides(vec3 p_origin, vec3 p_dir, float p_scene_
 #endif // DLSS_RR_ENABLED
 
 void main() {
+#ifdef DLSS_RR_ENABLED
+	if (raygen_push.is_raster_overlay_depth_pass != 0u) {
+		trace_raster_overlay_depth();
+		return;
+	}
+#endif
 #ifdef RT_TIMING_ENABLED
 	uvec2 start_clock = clockRealtime2x32EXT();
 #endif
@@ -291,8 +384,7 @@ void main() {
 		ps.hit_t = -1.0;
 		ps.offset_normal = vec3(0.0, 0.0, 1.0);
 		ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
-		// The camera is in air unless the project says otherwise (rt_camera_medium).
-		ps.medium = uint(clamp(rt_medium_global(rt_caustics.w, vec4(0.0)).x, 0.0, float(RT_MEDIA_COUNT - 1)) + 0.5);
+		ps.medium = rt_camera_medium();
 		ps.exit_shift_m = 0.0;
 
 		vec3 ray_origin = origin.xyz;
@@ -318,6 +410,10 @@ void main() {
 			// The segment's medium. A dielectric at its end switches ps.medium,
 			// but the peel layers before that end are still in this one.
 			uint medium_entry = ps.medium;
+#ifdef DLSS_RR_ENABLED
+			// Where a transparent layer seen through the primary glass starts counting from.
+			float transmit_length_at_segment_start = transmit_scene_length;
+#endif
 			ps.hit_t = -1.0; // A miss must not retain the previous segment's hit distance.
 			path_pack(payload, ps);
 			float t_far = (bounce == 0u) ? composite_t_max : 10000.0;
@@ -339,20 +435,22 @@ void main() {
 				transmit_through = true;
 			} else if (transmit_through && !transmit_flag_left) {
 				// The hit wrote its guides and cleared the flag.
-				dlss_rr_finish_transmitted_guides(origin.xyz, direction.xyz, transmit_scene_length + ps.hit_t);
+				dlss_rr_finish_transmitted_guides(origin.xyz, direction.xyz, transmit_scene_length + dlss_rr_apparent_length(ps.hit_t, medium_entry));
 				transmit_pending = false;
 				transmit_through = false;
 			}
 			if (transmit_through) {
 				if (ps.hit_t < 0.0) {
-					// Sky behind the glass. The walk would miss too and leave the guides as they are.
+					// Sky behind the glass. The walk would miss too and leave the guides as they are, but
+					// for the depth: far, so the raster overlay isn't hidden behind the glass.
+					imageStore(rt_depth_image, ivec2(gl_LaunchIDEXT.xy), vec4(0.0));
 					transmit_pending = false;
 					transmit_through = false;
 				} else {
 					// The hit left the flag, so it was a dielectric or a mirror. offset_normal is on
 					// the side the path goes on: the far side when it went through. A reflection
 					// or the bounce limit leaves the guides to the walk.
-					transmit_scene_length += ps.hit_t;
+					transmit_scene_length += dlss_rr_apparent_length(ps.hit_t, medium_entry);
 					bool went_through = dot(ray_dir, ps.offset_normal) > 0.0;
 					transmit_through = went_through && !is_path_terminated(ps.packed_bounces_flags);
 				}
@@ -431,6 +529,16 @@ void main() {
 					if (ps.hit_t < 0.0) {
 						break;
 					}
+#ifdef DLSS_RR_ENABLED
+					// A layer seen straight through the primary glass clears the flag when it takes the guides.
+					bool layer_took_transmitted_guides = (flags_entry & DLSS_RR_TRANSMIT_PENDING_FLAG) != 0u &&
+							(ps.packed_bounces_flags & DLSS_RR_TRANSMIT_PENDING_FLAG) == 0u;
+					if (layer_took_transmitted_guides) {
+						dlss_rr_finish_transmitted_guides(origin.xyz, direction.xyz,
+								transmit_length_at_segment_start + dlss_rr_apparent_length(ps.hit_t, medium_entry));
+						transmit_pending = false;
+					}
+#endif
 					continuation_rng = ps.rng_state;
 					float layer_weight = 1.0;
 					if (range_limited && indirect_fade > 0.0) {
@@ -512,9 +620,7 @@ void main() {
 			}
 			// Reconstruct the next ray origin from the current ray + hit distance, apply bias
 			vec3 hit_pos = ray_origin + ray_dir * ps.hit_t;
-			// Light that scattered under the surface leaves from where it came back out.
-			bool left_somewhere_else = ps.exit_shift_m > 0.0;
-			ray_origin = left_somewhere_else ? hit_pos + ps.offset_normal * ps.exit_shift_m : offset_ray_origin(hit_pos, ps.offset_normal);
+			ray_origin = get_next_ray_origin(hit_pos, ps);
 			ray_dir = ps.next_ray_dir;
 		}
 #ifdef DLSS_RR_ENABLED
