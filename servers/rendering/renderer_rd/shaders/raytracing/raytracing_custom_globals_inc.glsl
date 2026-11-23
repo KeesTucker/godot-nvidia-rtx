@@ -121,6 +121,24 @@ vec4 rt_fwidth(vec4 value) {
 	return vec4(RT_FWIDTH_EPSILON);
 }
 
+// rt_derivative stands in for dFdx and dFdy, which a hit shader can't have: no change across the screen. Without it,
+// a material that uses them (for a raster pass, say) fails its hit group.
+float rt_derivative(float value) {
+	return 0.0;
+}
+
+vec2 rt_derivative(vec2 value) {
+	return vec2(0.0);
+}
+
+vec3 rt_derivative(vec3 value) {
+	return vec3(0.0);
+}
+
+vec4 rt_derivative(vec4 value) {
+	return vec4(0.0);
+}
+
 /* RT_CUSTOM_TEXTURE_DEFINES */
 /* RT_CUSTOM_FRAGMENT_GLOBALS */
 

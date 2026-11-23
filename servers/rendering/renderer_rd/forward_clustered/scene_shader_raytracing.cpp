@@ -601,6 +601,12 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	bool uses_instance_custom = false;
 	actions.usage_flag_pointers["INSTANCE_CUSTOM"] = &uses_instance_custom;
 	actions.function_renames["fwidth"] = "rt_fwidth";
+	for (const char *derivative : { "dFdx", "dFdy", "dFdxCoarse", "dFdyCoarse", "dFdxFine", "dFdyFine" }) {
+		actions.function_renames[derivative] = "rt_derivative";
+	}
+	for (const char *width : { "fwidthCoarse", "fwidthFine" }) {
+		actions.function_renames[width] = "rt_fwidth";
+	}
 	int blend_modei = RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX;
 	actions.render_mode_values["blend_add"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD);
 	actions.render_mode_values["blend_mix"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX);
