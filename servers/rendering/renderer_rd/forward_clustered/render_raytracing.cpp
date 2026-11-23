@@ -509,6 +509,7 @@ RenderRaytracing::~RenderRaytracing() {
 	if (mat_ubo_pool_buffer.is_valid()) {
 		_free_rid_if_valid(mat_ubo_pool_buffer);
 	}
+	_free_rid_if_valid(raster_overlay_coverage_stand_in);
 
 	if (bindless_block) {
 		memdelete(bindless_block);
@@ -668,18 +669,25 @@ RID RenderRaytracing::rt_get_depth_texture(RenderSceneBuffersRD *p_render_buffer
 	return p_render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_DEPTH);
 }
 
-void RenderRaytracing::rt_set_raster_overlay_depth_size(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_size) {
+void RenderRaytracing::rt_set_raster_overlay_output_size(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_output_size) {
 	ERR_FAIL_NULL(p_render_buffers);
-	const bool has_texture = p_render_buffers->has_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH);
-	const bool is_size_changed = has_texture && Size2i(p_render_buffers->get_texture_format(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH).width, p_render_buffers->get_texture_format(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH).height) != p_size;
-	if (is_size_changed || (has_texture && p_size == Size2i())) {
+	const bool has_textures = p_render_buffers->has_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_COVERAGE);
+	const RD::TextureFormat coverage_format = has_textures ? p_render_buffers->get_texture_format(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_COVERAGE) : RD::TextureFormat();
+	const bool is_size_changed = has_textures && Size2i(coverage_format.width, coverage_format.height) != p_output_size;
+	if (is_size_changed) {
 		p_render_buffers->clear_context(RB_SCOPE_RT_RASTER_OVERLAY);
 	}
-	const bool needs_texture = p_size != Size2i() && !p_render_buffers->has_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH);
-	if (needs_texture) {
-		const uint32_t usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
-		p_render_buffers->create_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH, RD::DATA_FORMAT_R32_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1, p_size);
+	const bool needs_textures = p_output_size != Size2i() && !p_render_buffers->has_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_COVERAGE);
+	if (needs_textures) {
+		// The depth holds a pixel's four samples in a 2 x 2 block.
+		p_render_buffers->create_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_DEPTH, RD::DATA_FORMAT_R32_SFLOAT, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_1, p_output_size * 2);
+		p_render_buffers->create_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_COVERAGE, RD::DATA_FORMAT_D32_SFLOAT, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_4, p_output_size);
 	}
+}
+
+RID RenderRaytracing::rt_get_raster_overlay_coverage_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_NULL_V(p_render_buffers, RID());
+	return p_render_buffers->get_texture(RB_SCOPE_RT_RASTER_OVERLAY, RB_TEX_RT_RASTER_OVERLAY_COVERAGE);
 }
 
 bool RenderRaytracing::rt_has_raster_overlay_depth_texture(RenderSceneBuffersRD *p_render_buffers) const {
@@ -6148,6 +6156,25 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(u);
 	}
 
+	// Binding 43: the raster overlay's MSAA coverage. Only its depth launch reads it, so the path trace gets a stand-in.
+	{
+		if (raster_overlay_coverage_stand_in.is_null()) {
+			RD::TextureFormat stand_in_format;
+			stand_in_format.format = RD::DATA_FORMAT_D32_SFLOAT;
+			stand_in_format.width = 1;
+			stand_in_format.height = 1;
+			stand_in_format.samples = RD::TEXTURE_SAMPLES_4;
+			stand_in_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+			raster_overlay_coverage_stand_in = RD::get_singleton()->texture_create(stand_in_format, RD::TextureView());
+			RD::get_singleton()->set_resource_name(raster_overlay_coverage_stand_in, "RT Raster Overlay Coverage Stand-in");
+		}
+		RD::Uniform u;
+		u.binding = 43;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(raster_overlay_coverage_stand_in);
+		uniforms.push_back(u);
+	}
+
 	if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TIMING_ENABLED) {
 		if (!rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
 			rb->create_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING, RD::DATA_FORMAT_R32_SFLOAT,
@@ -6223,6 +6250,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 				if (uniform.binding == 15) {
 					uniform.clear_ids();
 					uniform.append_id(rt_get_raster_overlay_depth_texture(rb));
+				} else if (uniform.binding == 43) {
+					uniform.clear_ids();
+					uniform.append_id(rt_get_raster_overlay_coverage_texture(rb));
 				}
 			}
 			p_state->raster_overlay_depth_uniform_set = RD::get_singleton()->uniform_set_create(overlay_uniforms, shader_rd, RenderForwardClustered::SCENE_UNIFORM_SET, /*p_linear_pool=*/true);

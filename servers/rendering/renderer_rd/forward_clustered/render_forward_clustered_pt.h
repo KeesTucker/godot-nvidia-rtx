@@ -66,7 +66,18 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 		uint32_t pad[3];
 	};
 
+	// RasterOverlayTrace is what this frame's path trace leaves for the overlay's depth launch. No uniform set,
+	// no launch.
+	struct RasterOverlayTrace {
+		RID pipeline;
+		uint32_t rt_flags = 0;
+		RID uniform_set;
+		RID bindless_set;
+	};
+	RasterOverlayTrace raster_overlay_trace;
+
 	static uint32_t _get_raster_overlay_layers();
+	void _trace_raster_overlay_depth(const Size2i &p_output_size);
 	void _render_raster_overlay(RenderDataRD *p_render_data, const Color &p_default_bg_color, bool p_draws_on_upscaled, bool p_reverse_cull, const SceneShaderForwardClustered::ShaderSpecialization &p_base_specialization);
 
 protected:

@@ -51,6 +51,7 @@
 #define RB_TEX_RT_DEPTH SNAME("rt_depth")
 #define RB_SCOPE_RT_RASTER_OVERLAY SNAME("rt_raster_overlay")
 #define RB_TEX_RT_RASTER_OVERLAY_DEPTH SNAME("depth")
+#define RB_TEX_RT_RASTER_OVERLAY_COVERAGE SNAME("coverage")
 #define RB_TEX_RT_SKY SNAME("rt_sky")
 
 #define RB_SCOPE_RT_TIMING SNAME("rt_timing")
@@ -1132,8 +1133,8 @@ struct RTViewportState {
 	RID light_buffer;
 	RID params_buffer;
 	RID scene_uniform_set;
-	// raster_overlay_depth_uniform_set is scene_uniform_set with the raster overlay's full resolution depth
-	// as the depth image, for its depth only launch.
+	// raster_overlay_depth_uniform_set is scene_uniform_set with the raster overlay's sample depth as the depth
+	// image and its coverage bound, for its depth only launch.
 	RID raster_overlay_depth_uniform_set;
 
 	RID fog_shadows_ubo;
@@ -1421,6 +1422,7 @@ class RenderRaytracing {
 	// Material UBO sub-allocation pool. One large device-address buffer divided
 	// into fixed-size slots for performance reasons, and easier to debug.
 	RID mat_ubo_pool_buffer;
+	RID raster_overlay_coverage_stand_in;
 	uint64_t mat_ubo_pool_bda = 0;
 	LocalVector<uint32_t> mat_ubo_pool_free_slots;
 	uint32_t mat_ubo_pool_free_count = 0;
@@ -1579,10 +1581,12 @@ public:
 	bool rt_has_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	RID rt_get_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
 
-	// The raster overlay's depth, traced at the output size. A zero size frees it.
-	void rt_set_raster_overlay_depth_size(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_size);
+	// The raster overlay's depth, traced at its 4x MSAA samples, and the coverage that says which to trace. A zero
+	// output size frees them.
+	void rt_set_raster_overlay_output_size(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_output_size);
 	bool rt_has_raster_overlay_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	RID rt_get_raster_overlay_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
+	RID rt_get_raster_overlay_coverage_texture(RenderSceneBuffersRD *p_render_buffers) const;
 
 	// Screen-space sky, drawn before the trace so primary-ray misses can read
 	// the real sky shader instead of the prefiltered radiance octmap.

@@ -179,6 +179,8 @@ private:
 		COPY_TO_FB_COPY2,
 		COPY_TO_FB_SET_COLOR,
 		COPY_TO_FB_COPY_DEPTH, // R32F -> gl_FragDepth (depth-only framebuffer)
+		COPY_TO_FB_COPY_COLOR_AND_SAMPLE_DEPTHS, // colour and a 2 x 2 block of R32F per pixel -> 4x MSAA colour and depth
+		COPY_TO_FB_RESOLVE_HDR_MSAA, // 4x MSAA HDR colour -> its resolve, each sample weighted as if tone mapped
 		COPY_TO_FB_TIMING_HEATMAP,
 
 		// These variants are disabled unless XR shaders are enabled.
@@ -382,6 +384,12 @@ public:
 	void copy_depth_to_rect(RID p_source_rd_texture, RID p_dest_framebuffer, const Rect2i &p_rect, bool p_flip_y = false);
 	void copy_depth_to_rect_and_linearize(RID p_source_rd_texture, RID p_dest_texture, const Rect2i &p_rect, bool p_flip_y, float p_z_near, float p_z_far);
 	void copy_r32f_to_depth_fb(RID p_source_r32f, RID p_dest_depth_framebuffer, const Rect2i &p_rect);
+	// copy_color_and_sample_depths_to_msaa_fb fills a 4x MSAA colour and depth framebuffer: every sample takes its
+	// pixel's colour, and its own depth from the pixel's 2 x 2 block in p_source_sample_depths.
+	void copy_color_and_sample_depths_to_msaa_fb(RID p_source_color, RID p_source_sample_depths, RID p_dest_msaa_framebuffer, const Rect2i &p_rect);
+	// resolve_hdr_msaa_to_fb resolves 4x MSAA HDR colour. A plain average lets one bright sample swamp an edge
+	// once tone mapped, so each is weighted by 1 / (1 + its brightest channel) first.
+	void resolve_hdr_msaa_to_fb(RID p_source_msaa_color, RID p_dest_framebuffer, const Rect2i &p_rect);
 	void copy_to_fb_rect(RID p_source_rd_texture, RID p_dest_framebuffer, const Rect2i &p_rect, bool p_flip_y = false, bool p_force_luminance = false, bool p_alpha_to_zero = false, bool p_srgb = false, RID p_secondary = RID(), bool p_multiview = false, bool alpha_to_one = false, bool p_linear = false, bool p_normal = false, const Rect2 &p_src_rect = Rect2(), float p_linear_luminance_multiplier = 1.0, bool p_bilinear_filtering = true, CopyToFbFlagMode p_flag_mode = COPY_TO_FB_FLAG_MODE_NONE);
 	void copy_timing_heatmap_to_fb(RID p_source_texture, RID p_dest_framebuffer, const Rect2i &p_rect, float p_max_ticks, float p_opacity, bool p_linear);
 	void copy_to_atlas_fb(RID p_source_rd_texture, RID p_dest_framebuffer, const Rect2 &p_uv_rect, RD::DrawListID p_draw_list, bool p_flip_y = false, bool p_panorama = false);

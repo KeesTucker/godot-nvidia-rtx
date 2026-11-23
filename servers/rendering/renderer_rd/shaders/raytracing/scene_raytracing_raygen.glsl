@@ -45,8 +45,8 @@ layout(set = 0, binding = 30) uniform texture2D prepass_color_texture;
 
 layout(location = 0) rayPayloadEXT PathPayload payload;
 
-// RaygenPushConstant picks what a launch does: the path trace, or the raster overlay's full resolution
-// depth (rt_depth_image is then that depth).
+// RaygenPushConstant picks what a launch does: the path trace, or the raster overlay's depth at its MSAA
+// samples (rt_depth_image is then that depth).
 layout(push_constant, std430) uniform RaygenPushConstant {
 	uint is_raster_overlay_depth_pass;
 	uint pad_0;
@@ -54,6 +54,9 @@ layout(push_constant, std430) uniform RaygenPushConstant {
 	uint pad_2;
 }
 raygen_push;
+
+// rt_raster_overlay_coverage is the raster overlay's own 4x MSAA depth, drawn alone: a sample above 0 is one it covers.
+layout(set = 0, binding = 43) uniform texture2DMS rt_raster_overlay_coverage;
 
 struct ContinuationReservoir {
 	PathState selected;
@@ -276,10 +279,24 @@ void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
 
 // trace_raster_overlay_depth writes the apparent depth of this output pixel's unjittered camera ray, through
 // glass and water, for the raster overlay to test against at full resolution. Writes nothing else.
+// RASTER_OVERLAY_SAMPLE_OFFSETS are Vulkan's standard 4x MSAA sample positions in a pixel, in sample order.
+const vec2 RASTER_OVERLAY_SAMPLE_OFFSETS[4] = vec2[](vec2(0.375, 0.125), vec2(0.875, 0.375), vec2(0.125, 0.625), vec2(0.625, 0.875));
+
+// trace_raster_overlay_depth traces the overlay's depth at one of its 4x MSAA samples. The launch is twice the
+// output size each way, a pixel's samples in a 2 x 2 block. Only the samples the overlay covers are traced.
 void trace_raster_overlay_depth() {
-	vec2 pixel_center = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+	ivec2 texel = ivec2(gl_LaunchIDEXT.xy);
+	ivec2 pixel = texel / 2;
+	int sample_index = (texel.x & 1) | ((texel.y & 1) << 1);
+	bool is_covered_by_overlay = texelFetch(sampler2DMS(rt_raster_overlay_coverage, SAMPLER_NEAREST_CLAMP), pixel, sample_index).r > 0.0;
+	// No overlay fragment lands on an uncovered sample, so its stale depth is never tested.
+	if (!is_covered_by_overlay) {
+		return;
+	}
+	vec2 output_size = vec2(gl_LaunchSizeEXT.xy / 2u);
+	vec2 sample_place = vec2(pixel) + RASTER_OVERLAY_SAMPLE_OFFSETS[sample_index];
 	// The scene's projection is jittered: an unjittered ndc d sits at d + jitter in it.
-	vec2 jittered_ndc = pixel_center / vec2(gl_LaunchSizeEXT.xy) * 2.0 - 1.0 + scene_data_block.data.taa_jitter;
+	vec2 jittered_ndc = sample_place / output_size * 2.0 - 1.0 + scene_data_block.data.taa_jitter;
 	mat4 inv_view = transpose(mat4(scene_data_block.data.inv_view_matrix[0],
 			scene_data_block.data.inv_view_matrix[1],
 			scene_data_block.data.inv_view_matrix[2],
@@ -293,7 +310,7 @@ void trace_raster_overlay_depth() {
 
 	SmoothHitWalk walk = dlss_rr_walk_through_smooth_hits(origin, direction);
 	float ndc_depth = walk.has_reached ? rt_ndc_depth(origin + direction * walk.scene_length) : 0.0;
-	imageStore(rt_depth_image, ivec2(gl_LaunchIDEXT.xy), vec4(ndc_depth));
+	imageStore(rt_depth_image, texel, vec4(ndc_depth));
 }
 
 // dlss_rr_finish_transmitted_guides finishes the guides of a surface the path itself reached

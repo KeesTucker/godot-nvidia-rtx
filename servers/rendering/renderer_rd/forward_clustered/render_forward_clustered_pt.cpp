@@ -271,7 +271,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		}
 		// The depth only launch walks with the DLSS-RR guide rays, so it's there only with them.
 		const bool needs_raster_overlay_depth = dlss_rr_enabled && using_upscaling && _get_raster_overlay_layers() != 0;
-		raytracing->rt_set_raster_overlay_depth_size(rb.ptr(), needs_raster_overlay_depth ? rb->get_target_size() : Size2i());
+		raytracing->rt_set_raster_overlay_output_size(rb.ptr(), needs_raster_overlay_depth ? rb->get_target_size() : Size2i());
 
 		// The uniform set is built here, ahead of the sky block, so the sky texture
 		// has to exist by now even though it is drawn into later this frame. Only
@@ -467,6 +467,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 #ifdef RT_VALIDATION_ENABLED
 	trace = trace && raytracing->rtv_validate_trace(rt_state);
 #endif
+	raster_overlay_trace = RasterOverlayTrace();
 	if (trace) {
 		RD::get_singleton()->draw_command_begin_label("Raytracing");
 		RENDER_TIMESTAMP("TLAS Build");
@@ -501,22 +502,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), rt_size.width, rt_size.height, 1);
 		RD::get_singleton()->raytracing_list_end();
 
-		// A list of its own, so its timestamp times it apart from the path tracer's.
-		const RID raster_overlay_depth_uniform_set = raytracing->get_raster_overlay_depth_uniform_set(rt_state);
-		if (raster_overlay_depth_uniform_set.is_valid()) {
-			RENDER_TIMESTAMP("Raster Overlay Depth");
-			RD::RaytracingListID overlay_depth_list = RD::get_singleton()->raytracing_list_begin();
-			RD::get_singleton()->raytracing_list_bind_raytracing_pipeline(overlay_depth_list, rt_pipeline);
-			RD::get_singleton()->raytracing_list_bind_uniform_set(overlay_depth_list, raster_overlay_depth_uniform_set, 0);
-			if (bindless_set.is_valid()) {
-				RD::get_singleton()->raytracing_list_bind_uniform_set(overlay_depth_list, bindless_set, 1);
-			}
-			raygen_push.is_raster_overlay_depth_pass = 1;
-			RD::get_singleton()->raytracing_list_set_push_constant(overlay_depth_list, &raygen_push, sizeof(RaygenPushConstant));
-			const Size2i overlay_depth_size = rb->get_target_size();
-			RD::get_singleton()->raytracing_list_trace_rays(overlay_depth_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), overlay_depth_size.width, overlay_depth_size.height, 1);
-			RD::get_singleton()->raytracing_list_end();
-		}
+		// The overlay traces its depth after the upscale, once it knows which samples it covers.
+		raster_overlay_trace = RasterOverlayTrace{ rt_pipeline, rt_flags, raytracing->get_raster_overlay_depth_uniform_set(rt_state), bindless_set };
 
 		RD::get_singleton()->draw_command_end_label();
 
@@ -683,6 +670,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 #define RB_SCOPE_RASTER_OVERLAY SNAME("raster_overlay")
 #define RB_TEX_RASTER_OVERLAY_DEPTH SNAME("depth")
+#define RB_TEX_RASTER_OVERLAY_COLOR_MSAA SNAME("color_msaa")
+#define RB_TEX_RASTER_OVERLAY_DEPTH_MSAA SNAME("depth_msaa")
 
 uint32_t RenderForwardClusteredPT::_get_raster_overlay_layers() {
 	return uint32_t(int(GLOBAL_GET_CACHED(int, "rendering/pathtracing/raster_overlay_layers")));
@@ -715,19 +704,22 @@ void RenderForwardClusteredPT::_render_raster_overlay(RenderDataRD *p_render_dat
 	RD::get_singleton()->draw_command_begin_label("Raster Overlay");
 
 	const Size2i output_size = p_draws_on_upscaled ? rb->get_target_size() : rb->get_internal_size();
-	if (rb->has_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH) && rb->get_texture_format(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH).width != uint32_t(output_size.width)) {
+	// With DLSS-RR the overlay is drawn 4x MSAA, its depth traced at every sample it covers, so blades cut
+	// across it with smooth edges and thin ones don't break up. Without, it's drawn once a pixel against the
+	// internal size depth, stretched and nearest sampled.
+	const bool is_antialiased = p_draws_on_upscaled && raster_overlay_trace.uniform_set.is_valid() && raytracing->rt_has_raster_overlay_depth_texture(rb.ptr());
+	const bool is_size_changed = rb->has_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH) && rb->get_texture_format(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH).width != uint32_t(output_size.width);
+	if (is_size_changed) {
 		rb->clear_context(RB_SCOPE_RASTER_OVERLAY);
 	}
 	if (!rb->has_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH)) {
 		rb->create_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH, RD::DATA_FORMAT_D32_SFLOAT, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_1, output_size);
 	}
-	const RID depth = rb->get_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH);
+	if (is_antialiased && !rb->has_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_COLOR_MSAA)) {
+		rb->create_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_COLOR_MSAA, rb->get_base_data_format(), RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_4, output_size);
+		rb->create_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH_MSAA, RD::DATA_FORMAT_D32_SFLOAT, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, RD::TEXTURE_SAMPLES_4, output_size);
+	}
 	const RID color = p_draws_on_upscaled ? rb->get_upscaled_texture() : rb->get_internal_texture();
-	// The depth traced at the output size has every blade's edge exact. Without it (no DLSS-RR), the
-	// internal size depth is stretched, nearest sampled.
-	const bool has_full_size_depth = p_draws_on_upscaled && raytracing->rt_has_raster_overlay_depth_texture(rb.ptr());
-	const RID traced_depth = has_full_size_depth ? raytracing->rt_get_raster_overlay_depth_texture(rb.ptr()) : raytracing->rt_get_depth_texture(rb.ptr());
-	copy_effects->copy_r32f_to_depth_fb(traced_depth, FramebufferCacheRD::get_singleton()->get_cache(depth), Rect2i(Point2i(), output_size));
 
 	RenderSceneDataRD *scene_data = p_render_data->scene_data;
 	const Vector2 taa_jitter = scene_data->taa_jitter;
@@ -735,26 +727,76 @@ void RenderForwardClusteredPT::_render_raster_overlay(RenderDataRD *p_render_dat
 	const uint32_t uniform_buffer_index = _setup_environment(p_render_data, false, output_size, output_size, p_default_bg_color, false);
 	scene_data->taa_jitter = taa_jitter;
 
-	const RID framebuffer = FramebufferCacheRD::get_singleton()->get_cache(color, depth);
 	const bool is_wireframe = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME;
 	const RenderListType lists[] = { RENDER_LIST_OPAQUE, RENDER_LIST_ALPHA };
+	// Each list's instance data sits in its own buffer, bound by its own render pass set.
+	RID rp_uniform_sets[RENDER_LIST_MAX];
+	for (const RenderListType list : lists) {
+		if (!render_list[list].elements.is_empty()) {
+			rp_uniform_sets[list] = _setup_render_pass_uniform_set(list, p_render_data, RID(), rb->get_samplers(), uniform_buffer_index, true);
+		}
+	}
+	auto render_overlay_list = [&](RenderListType p_list, PassMode p_pass_mode, uint32_t p_color_pass_flags, RID p_framebuffer) {
+		RenderListParameters params(render_list[p_list].elements.ptr(), render_list[p_list].element_info.ptr(), render_list[p_list].elements.size(), p_reverse_cull, p_pass_mode, p_color_pass_flags, false, p_render_data->directional_light_soft_shadows, rp_uniform_sets[p_list], is_wireframe, Vector2(), scene_data->lod_distance_multiplier, scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization);
+		_render_list_with_draw_list(&params, p_framebuffer, RD::DRAW_DEFAULT_ALL);
+	};
+
+	RID target_color = color;
+	RID target_depth = rb->get_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH);
+	if (is_antialiased) {
+		// The overlay's own depth, alone, says which samples the trace needs.
+		const RID coverage_framebuffer = FramebufferCacheRD::get_singleton()->get_cache(raytracing->rt_get_raster_overlay_coverage_texture(rb.ptr()));
+		RD::get_singleton()->draw_list_begin(coverage_framebuffer, RD::DRAW_CLEAR_ALL, Vector<Color>(), 0.0f);
+		RD::get_singleton()->draw_list_end();
+		for (const RenderListType list : lists) {
+			if (!render_list[list].elements.is_empty()) {
+				render_overlay_list(list, PASS_MODE_DEPTH, 0, coverage_framebuffer);
+			}
+		}
+		_trace_raster_overlay_depth(output_size);
+
+		RENDER_TIMESTAMP("Raster Overlay");
+		target_color = rb->get_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_COLOR_MSAA);
+		target_depth = rb->get_texture(RB_SCOPE_RASTER_OVERLAY, RB_TEX_RASTER_OVERLAY_DEPTH_MSAA);
+		copy_effects->copy_color_and_sample_depths_to_msaa_fb(color, raytracing->rt_get_raster_overlay_depth_texture(rb.ptr()), FramebufferCacheRD::get_singleton()->get_cache(target_color, target_depth), Rect2i(Point2i(), output_size));
+	} else {
+		copy_effects->copy_r32f_to_depth_fb(raytracing->rt_get_depth_texture(rb.ptr()), FramebufferCacheRD::get_singleton()->get_cache(target_depth), Rect2i(Point2i(), output_size));
+	}
+
+	const RID target_framebuffer = FramebufferCacheRD::get_singleton()->get_cache(target_color, target_depth);
 	for (const RenderListType list : lists) {
 		if (render_list[list].elements.is_empty()) {
 			continue;
 		}
-		// Each list's instance data sits in its own buffer, bound by its own render pass set.
-		const RID rp_uniform_set = _setup_render_pass_uniform_set(list, p_render_data, RID(), rb->get_samplers(), uniform_buffer_index, true);
 		if (list == RENDER_LIST_OPAQUE) {
 			// The opaque colour pass only draws where depth is EQUAL to a pre-pass's, so lay one first.
-			RenderListParameters depth_params(render_list[list].elements.ptr(), render_list[list].element_info.ptr(), render_list[list].elements.size(), p_reverse_cull, PASS_MODE_DEPTH, 0, false, p_render_data->directional_light_soft_shadows, rp_uniform_set, is_wireframe, Vector2(), scene_data->lod_distance_multiplier, scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization);
-			_render_list_with_draw_list(&depth_params, FramebufferCacheRD::get_singleton()->get_cache(depth), RD::DRAW_DEFAULT_ALL);
+			render_overlay_list(list, PASS_MODE_DEPTH, 0, FramebufferCacheRD::get_singleton()->get_cache(target_depth));
 		}
 		const uint32_t color_pass_flags = list == RENDER_LIST_ALPHA ? uint32_t(COLOR_PASS_FLAG_TRANSPARENT) : 0u;
-		RenderListParameters params(render_list[list].elements.ptr(), render_list[list].element_info.ptr(), render_list[list].elements.size(), p_reverse_cull, PASS_MODE_COLOR, color_pass_flags, false, p_render_data->directional_light_soft_shadows, rp_uniform_set, is_wireframe, Vector2(), scene_data->lod_distance_multiplier, scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization);
-		_render_list_with_draw_list(&params, framebuffer, RD::DRAW_DEFAULT_ALL);
+		render_overlay_list(list, PASS_MODE_COLOR, color_pass_flags, target_framebuffer);
+	}
+	if (is_antialiased) {
+		copy_effects->resolve_hdr_msaa_to_fb(target_color, FramebufferCacheRD::get_singleton()->get_cache(color), Rect2i(Point2i(), output_size));
 	}
 
 	RD::get_singleton()->draw_command_end_label();
+}
+
+void RenderForwardClusteredPT::_trace_raster_overlay_depth(const Size2i &p_output_size) {
+	RENDER_TIMESTAMP("Raster Overlay Depth");
+	RD::RaytracingListID list = RD::get_singleton()->raytracing_list_begin();
+	RD::get_singleton()->raytracing_list_bind_raytracing_pipeline(list, raster_overlay_trace.pipeline);
+	RD::get_singleton()->raytracing_list_bind_uniform_set(list, raster_overlay_trace.uniform_set, 0);
+	if (raster_overlay_trace.bindless_set.is_valid()) {
+		RD::get_singleton()->raytracing_list_bind_uniform_set(list, raster_overlay_trace.bindless_set, 1);
+	}
+	RaygenPushConstant raygen_push = {};
+	raygen_push.is_raster_overlay_depth_pass = 1;
+	RD::get_singleton()->raytracing_list_set_push_constant(list, &raygen_push, sizeof(RaygenPushConstant));
+	// A sample a ray: each pixel's four in a 2 x 2 block.
+	const Size2i sample_grid_size = p_output_size * 2;
+	RD::get_singleton()->raytracing_list_trace_rays(list, 0, raytracing->get_shader()->get_hit_sbt(raster_overlay_trace.rt_flags), sample_grid_size.width, sample_grid_size.height, 1);
+	RD::get_singleton()->raytracing_list_end();
 }
 
 // Raytracing methods

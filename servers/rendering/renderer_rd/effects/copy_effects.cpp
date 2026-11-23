@@ -120,6 +120,8 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 		copy_modes.push_back("\n#define MODE_TWO_SOURCES\n"); // COPY_TO_FB_COPY2
 		copy_modes.push_back("\n#define MODE_SET_COLOR\n"); // COPY_TO_FB_SET_COLOR
 		copy_modes.push_back("\n#define MODE_COPY_DEPTH\n"); // COPY_TO_FB_COPY_DEPTH
+		copy_modes.push_back("\n#define MODE_COPY_COLOR_AND_SAMPLE_DEPTHS\n"); // COPY_TO_FB_COPY_COLOR_AND_SAMPLE_DEPTHS
+		copy_modes.push_back("\n#define MODE_RESOLVE_HDR_MSAA\n"); // COPY_TO_FB_RESOLVE_HDR_MSAA
 		copy_modes.push_back("\n#define MODE_TIMING_HEATMAP\n"); // COPY_TO_FB_TIMING_HEATMAP
 		copy_modes.push_back("\n#define USE_MULTIVIEW\n"); // COPY_TO_FB_MULTIVIEW
 		copy_modes.push_back("\n#define USE_MULTIVIEW\n#define MODE_TWO_SOURCES\n"); // COPY_TO_FB_MULTIVIEW_WITH_DEPTH
@@ -144,6 +146,17 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 					dss.depth_compare_operator = RD::COMPARE_OP_ALWAYS;
 					dss.enable_depth_write = true;
 					copy_to_fb.pipelines[i].setup(copy_to_fb.shader.version_get_shader(copy_to_fb.shader_version, i), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState::create_disabled(0), 0);
+				} else if (i == COPY_TO_FB_COPY_COLOR_AND_SAMPLE_DEPTHS) {
+					// Shaded a sample at a time, as each sample gets its own depth.
+					RD::PipelineDepthStencilState dss;
+					dss.enable_depth_test = true;
+					dss.depth_compare_operator = RD::COMPARE_OP_ALWAYS;
+					dss.enable_depth_write = true;
+					RD::PipelineMultisampleState multisample;
+					multisample.sample_count = RD::TEXTURE_SAMPLES_4;
+					multisample.enable_sample_shading = true;
+					multisample.min_sample_shading = 1.0f;
+					copy_to_fb.pipelines[i].setup(copy_to_fb.shader.version_get_shader(copy_to_fb.shader_version, i), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), multisample, dss, RD::PipelineColorBlendState::create_disabled(1), 0);
 				} else {
 					RD::PipelineColorBlendState blend = RD::PipelineColorBlendState::create_disabled();
 					if (i == COPY_TO_FB_TIMING_HEATMAP) {
@@ -608,6 +621,58 @@ void CopyEffects::copy_r32f_to_depth_fb(RID p_source_r32f, RID p_dest_depth_fram
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_depth_framebuffer, RD::DRAW_CLEAR_ALL, Vector<Color>(), 0.0f, 0, p_rect);
 	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, copy_to_fb.pipelines[mode].get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_depth_framebuffer)));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source), 0);
+	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
+	RD::get_singleton()->draw_list_set_push_constant(draw_list, &copy_to_fb.push_constant, sizeof(CopyToFbPushConstant));
+	RD::get_singleton()->draw_list_draw(draw_list, true);
+	RD::get_singleton()->draw_list_end();
+}
+
+void CopyEffects::copy_color_and_sample_depths_to_msaa_fb(RID p_source_color, RID p_source_sample_depths, RID p_dest_msaa_framebuffer, const Rect2i &p_rect) {
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	memset(&copy_to_fb.push_constant, 0, sizeof(CopyToFbPushConstant));
+	copy_to_fb.push_constant.luminance_multiplier = 1.0;
+
+	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::Uniform u_color(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, p_source_color }));
+	RD::Uniform u_sample_depths(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, p_source_sample_depths }));
+
+	CopyToFBMode mode = COPY_TO_FB_COPY_COLOR_AND_SAMPLE_DEPTHS;
+	RID shader = copy_to_fb.shader.version_get_shader(copy_to_fb.shader_version, mode);
+	ERR_FAIL_COND(shader.is_null());
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_msaa_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, p_rect);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, copy_to_fb.pipelines[mode].get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_msaa_framebuffer)));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_color), 0);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 1, u_sample_depths), 1);
+	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
+	RD::get_singleton()->draw_list_set_push_constant(draw_list, &copy_to_fb.push_constant, sizeof(CopyToFbPushConstant));
+	RD::get_singleton()->draw_list_draw(draw_list, true);
+	RD::get_singleton()->draw_list_end();
+}
+
+void CopyEffects::resolve_hdr_msaa_to_fb(RID p_source_msaa_color, RID p_dest_framebuffer, const Rect2i &p_rect) {
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	memset(&copy_to_fb.push_constant, 0, sizeof(CopyToFbPushConstant));
+	copy_to_fb.push_constant.luminance_multiplier = 1.0;
+
+	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::Uniform u_source(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, p_source_msaa_color }));
+
+	CopyToFBMode mode = COPY_TO_FB_RESOLVE_HDR_MSAA;
+	RID shader = copy_to_fb.shader.version_get_shader(copy_to_fb.shader_version, mode);
+	ERR_FAIL_COND(shader.is_null());
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, p_rect);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, copy_to_fb.pipelines[mode].get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_framebuffer)));
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source), 0);
 	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
 	RD::get_singleton()->draw_list_set_push_constant(draw_list, &copy_to_fb.push_constant, sizeof(CopyToFbPushConstant));
