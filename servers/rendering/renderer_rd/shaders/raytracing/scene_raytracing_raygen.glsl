@@ -261,19 +261,33 @@ bool dlss_rr_get_miss(DlssRrCrossings p_crossings, vec3 p_origin, vec3 p_dir, ve
 	return true;
 }
 
-// dlss_rr_get_prev_camera_position is where last frame's camera sat: the point its projection takes to the middle of
-// the screen at w = 0. False for an orthogonal camera, which has no such point.
-bool dlss_rr_get_prev_camera_position(out vec3 r_position) {
-	mat4 prev_vp = prev_vp_unjittered;
-	vec4 row_x = vec4(prev_vp[0][0], prev_vp[1][0], prev_vp[2][0], prev_vp[3][0]);
-	vec4 row_y = vec4(prev_vp[0][1], prev_vp[1][1], prev_vp[2][1], prev_vp[3][1]);
-	vec4 row_w = vec4(prev_vp[0][3], prev_vp[1][3], prev_vp[2][3], prev_vp[3][3]);
+// dlss_rr_get_camera_position_of is where a view projection's camera sits: the point it takes to the middle of the
+// screen at w = 0. False for an orthogonal camera, which has no such point.
+bool dlss_rr_get_camera_position_of(mat4 p_vp, out vec3 r_position) {
+	vec4 row_x = vec4(p_vp[0][0], p_vp[1][0], p_vp[2][0], p_vp[3][0]);
+	vec4 row_y = vec4(p_vp[0][1], p_vp[1][1], p_vp[2][1], p_vp[3][1]);
+	vec4 row_w = vec4(p_vp[0][3], p_vp[1][3], p_vp[2][3], p_vp[3][3]);
 	mat3 rows = transpose(mat3(row_x.xyz, row_y.xyz, row_w.xyz));
 	r_position = vec3(0.0);
 	if (abs(determinant(rows)) < 1e-12) {
 		return false;
 	}
 	r_position = inverse(rows) * -vec3(row_x.w, row_y.w, row_w.w);
+	return true;
+}
+
+// dlss_rr_get_prev_camera_position is where last frame's camera sat: this frame's camera moved by the difference of
+// the two projections' cameras. Solving a projection for its camera is off by about a tenth of a millimetre, which
+// tilted every reprojected ray into a swirl of tiny motion; the same error in both cancels, so a still camera gets
+// none.
+bool dlss_rr_get_prev_camera_position(vec3 p_camera_position, out vec3 r_position) {
+	vec3 prev_camera_solved;
+	vec3 camera_solved;
+	r_position = p_camera_position;
+	if (!dlss_rr_get_camera_position_of(prev_vp_unjittered, prev_camera_solved) || !dlss_rr_get_camera_position_of(curr_vp_unjittered, camera_solved)) {
+		return false;
+	}
+	r_position = p_camera_position + (prev_camera_solved - camera_solved);
 	return true;
 }
 
@@ -293,14 +307,14 @@ vec3 dlss_rr_get_perpendicular(vec3 p_dir) {
 // meets p_prev_pos. The apparent point is right for where a point looks but not for how it moves: past a slanted
 // pane the image swings as if much nearer the glass, so at steep angles its motion vectors dragged Ray
 // Reconstruction's history across whatever was behind. False if it doesn't settle; use the apparent point then.
-bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_apparent_pos, vec3 p_apparent_prev_pos, vec3 p_prev_pos, out vec2 r_mv) {
+bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_camera_position, vec3 p_apparent_pos, vec3 p_apparent_prev_pos, vec3 p_prev_pos, out vec2 r_mv) {
 	r_mv = vec2(0.0);
 	bool has_crossings = p_crossings.index_ratios.x != 0.0;
 	if (p_crossings.is_unusable || !has_crossings) {
 		return false;
 	}
 	vec3 prev_camera;
-	if (!dlss_rr_get_prev_camera_position(prev_camera)) {
+	if (!dlss_rr_get_prev_camera_position(p_camera_position, prev_camera)) {
 		return false;
 	}
 	// The apparent point's own motion is a close first guess.
@@ -340,15 +354,17 @@ bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_app
 	if (!dlss_rr_get_miss(p_crossings, prev_camera, dir, p_prev_pos, across_a, across_b, miss) || length(miss) > DLSS_RR_REPROJECTION_MISS_M) {
 		return false;
 	}
-	r_mv = project_uv(prev_camera + dir, prev_vp_unjittered) - project_uv(p_apparent_pos, curr_vp_unjittered);
+	// Projected as far out as the apparent point, so the two projections round the same way.
+	float apparent_distance_m = distance(p_apparent_pos, p_camera_position);
+	r_mv = project_uv(prev_camera + dir * apparent_distance_m, prev_vp_unjittered) - project_uv(p_apparent_pos, curr_vp_unjittered);
 	return true;
 }
 
 // dlss_rr_get_motion_vector_through_crossings reprojects through the crossings where it can, and otherwise moves the
 // apparent point by p_motion.
-vec2 dlss_rr_get_motion_vector_through_crossings(DlssRrCrossings p_crossings, vec3 p_apparent_pos, vec3 p_world_pos, vec3 p_motion, vec3 p_apparent_motion) {
+vec2 dlss_rr_get_motion_vector_through_crossings(DlssRrCrossings p_crossings, vec3 p_camera_position, vec3 p_apparent_pos, vec3 p_world_pos, vec3 p_motion, vec3 p_apparent_motion) {
 	vec2 mv;
-	if (dlss_rr_reproject_through_crossings(p_crossings, p_apparent_pos, p_apparent_pos + p_apparent_motion, p_world_pos + p_motion, mv)) {
+	if (dlss_rr_reproject_through_crossings(p_crossings, p_camera_position, p_apparent_pos, p_apparent_pos + p_apparent_motion, p_world_pos + p_motion, mv)) {
 		return mv;
 	}
 	return rt_motion_vector(p_apparent_pos, p_apparent_pos + p_apparent_motion);
@@ -446,7 +462,7 @@ void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
 	vec3 apparent_pos = p_origin + p_dir * walk.scene_length;
 	vec3 motion = vec3(unpackHalf2x16(payload.packed_rt[0]), unpackHalf2x16(payload.packed_rt[1]).x);
 	float roughness = unpackHalf2x16(payload.packed_rt[1]).y;
-	vec2 mv = dlss_rr_get_motion_vector_through_crossings(walk.crossings, apparent_pos, walk.hit_pos, motion, walk.image_xform * motion);
+	vec2 mv = dlss_rr_get_motion_vector_through_crossings(walk.crossings, p_origin, apparent_pos, walk.hit_pos, motion, walk.image_xform * motion);
 	imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
 	dlss_rr_write_specular_motion_vector(mv);
 	imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
@@ -500,7 +516,7 @@ void dlss_rr_finish_transmitted_guides(vec3 p_origin, vec3 p_dir, float p_scene_
 	ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
 	vec3 motion = vec3(imageLoad(rt_velocity_image, pixel).xy, imageLoad(rt_depth_image, pixel).x);
 	vec3 apparent_pos = p_origin + p_dir * p_scene_length;
-	vec2 mv = dlss_rr_get_motion_vector_through_crossings(p_crossings, apparent_pos, p_hit_pos, motion, motion);
+	vec2 mv = dlss_rr_get_motion_vector_through_crossings(p_crossings, p_origin, apparent_pos, p_hit_pos, motion, motion);
 	imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
 	dlss_rr_write_specular_motion_vector(mv);
 	imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
