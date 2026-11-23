@@ -483,6 +483,7 @@ void SceneShaderRaytracing::_finalize_uniforms_with_textures(
 		tui.hint = tex.hint;
 		tui.use_color = tex.use_color;
 		tui.is_global = tex.global;
+		tui.is_2d = tex.type == ShaderLanguage::TYPE_SAMPLER2D || tex.type == ShaderLanguage::TYPE_ISAMPLER2D || tex.type == ShaderLanguage::TYPE_USAMPLER2D;
 		tui.buffer_offset = offset;
 		r_entry.texture_uniforms.push_back(tui);
 
@@ -1269,6 +1270,12 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 		String tex_defines;
 		for (int ti = 0; ti < entry.texture_uniforms.size(); ti++) {
 			const TextureUniformInfo &tui = entry.texture_uniforms[ti];
+			// The path tracer binds the caustics volume itself (binding 42), so a material's global reads that.
+			const bool is_caustics_volume = tui.is_global && !tui.is_2d && tui.name == SNAME("rt_caustics_volume");
+			if (is_caustics_volume) {
+				tex_defines += "#define m_" + tui.name + " rt_caustics_volume\n";
+				continue;
+			}
 			tex_defines += "#define m_" + tui.name + " bindless_textures[nonuniformEXT(material.m_" + tui.name + ")]\n";
 		}
 		String uniform_members = entry.uniform_members.is_empty() ? String("float _rt_pad;") : entry.uniform_members;

@@ -822,18 +822,113 @@ float dielectric_relative_ior(HitData h, MaterialData surface_material) {
 	return h.is_front_face ? outside_ior / inside_ior : inside_ior / outside_ior;
 }
 
+// dielectric_reflectance is the unpolarised Fresnel reflectance crossing into a medium with relative_ior the
+// ratio of the left index to the entered one, 1 past the critical angle.
+float dielectric_reflectance(float p_relative_ior, float p_cos_incident, out float r_cos_transmitted) {
+	float sin_transmitted_squared = p_relative_ior * p_relative_ior * (1.0 - p_cos_incident * p_cos_incident);
+	r_cos_transmitted = 0.0;
+	if (sin_transmitted_squared >= 1.0) {
+		return 1.0;
+	}
+	r_cos_transmitted = sqrt(1.0 - sin_transmitted_squared);
+	float s_polarised = (p_relative_ior * p_cos_incident - r_cos_transmitted) / (p_relative_ior * p_cos_incident + r_cos_transmitted);
+	float p_polarised = (p_cos_incident - p_relative_ior * r_cos_transmitted) / (p_cos_incident + p_relative_ior * r_cos_transmitted);
+	return 0.5 * (s_polarised * s_polarised + p_polarised * p_polarised);
+}
+
+// ThinSlabCrossing is a whole flat pane (RT_MAT_FLAG_THIN_SLAB) met in one hit: the hit is its front face (the
+// outside medium's side) and the pane lies behind it. Its faces are parallel, so a ray through it leaves bent as
+// if it crossed straight from the near medium into the far one; the pane only moves it sideways, tints it and
+// reflects at both faces, light going back and forth between them included.
+struct ThinSlabCrossing {
+	vec3 reflectance; // Per colour: both faces' reflections back to the near side.
+	vec3 transmittance; // Per colour: what gets through to the far side.
+	vec3 transmitted_dir; // 0 when nothing gets through.
+	vec3 hit_to_exit; // From the hit to where the ray leaves the pane's far face.
+};
+
+// A ray already in the pane's medium (p_ray_medium) came in through real glass beside the pane, like a tank's
+// thick edges: it only crosses the pane's far face, and its medium has already absorbed it.
+ThinSlabCrossing get_thin_slab_crossing(HitData h, vec3 N, vec3 V, MaterialData p_material, uint p_ray_medium) {
+	bool is_in_pane = p_ray_medium == p_material.slab_medium;
+	float slab_ior = rt_medium_index_of_refraction(p_material.slab_medium);
+	float near_ior = is_in_pane ? slab_ior : rt_medium_index_of_refraction(h.is_front_face ? p_material.outside_medium : p_material.inside_medium);
+	float far_ior = rt_medium_index_of_refraction(h.is_front_face ? p_material.inside_medium : p_material.outside_medium);
+	float cos_incident = clamp(dot(N, V), 1e-4, 1.0);
+	float cos_in_slab = cos_incident;
+	float near_face_reflectance = is_in_pane ? 0.0 : dielectric_reflectance(near_ior / slab_ior, cos_incident, cos_in_slab);
+	float cos_leaving;
+	float far_face_reflectance = cos_in_slab > 0.0 ? dielectric_reflectance(slab_ior / far_ior, cos_in_slab, cos_leaving) : 1.0;
+	float path_in_slab_m = is_in_pane ? 0.0 : p_material.slab_thickness_m / max(cos_in_slab, 1e-4);
+	vec3 slab_transmittance = exp(-rt_medium_extinction(p_material.slab_medium) * path_in_slab_m);
+	// Light bouncing between the faces: a geometric series, each round trip through the pane twice.
+	vec3 round_trip = near_face_reflectance * far_face_reflectance * slab_transmittance * slab_transmittance;
+	vec3 into_slab = vec3(1.0 - near_face_reflectance);
+	ThinSlabCrossing crossing;
+	crossing.reflectance = near_face_reflectance + into_slab * into_slab * far_face_reflectance * slab_transmittance * slab_transmittance / (1.0 - round_trip);
+	crossing.transmittance = into_slab * (1.0 - far_face_reflectance) * slab_transmittance / (1.0 - round_trip);
+	bool gets_through = far_face_reflectance < 1.0;
+	crossing.transmitted_dir = gets_through ? refract(-V, N, near_ior / far_ior) : vec3(0.0);
+	vec3 dir_in_slab = cos_in_slab > 0.0 ? refract(-V, N, near_ior / slab_ior) : vec3(0.0);
+	vec3 across_slab = dir_in_slab * path_in_slab_m;
+	// Met from inside, the pane's near face is in front of the hit: the ray met it a slab's crossing earlier.
+	bool has_near_face_before_hit = !h.is_front_face && !is_in_pane;
+	vec3 hit_to_near_face = has_near_face_before_hit ? V * (p_material.slab_thickness_m / cos_incident) : vec3(0.0);
+	crossing.hit_to_exit = hit_to_near_face + across_slab;
+	return crossing;
+}
+
+// put_thin_slab_exit_in starts a ray through a pane where it leaves the far face, as a subsurface exit is
+// started: exit_shift_m along the offset normal. Raygen tells a crossing from a reflection by that shift going on
+// along the ray, which a pane met from inside can undo (its exit is level with the hit, a little behind), so
+// there the start moves a little further along the new ray, within the 1 mm the next trace skips anyway.
+void put_thin_slab_exit_in(ThinSlabCrossing p_crossing, vec3 V, inout vec3 r_offset_normal, inout float r_exit_shift_m) {
+	vec3 to_exit = p_crossing.hit_to_exit;
+	float forward_m = dot(to_exit, -V);
+	float more_along_new_ray_m = max(0.0, (1e-4 - forward_m) / max(dot(p_crossing.transmitted_dir, -V), 1e-3));
+	to_exit += p_crossing.transmitted_dir * more_along_new_ray_m;
+	float exit_shift_m = length(to_exit);
+	if (exit_shift_m > 0.0) {
+		r_offset_normal = to_exit / exit_shift_m;
+		r_exit_shift_m = exit_shift_m;
+	}
+}
+
+// sample_thin_slab_continuation reflects or goes through a whole pane, with the probability of each, so the
+// throughput only carries their colour and the pane's absorption.
+void sample_thin_slab_continuation(HitData h, vec3 N, vec3 V, MaterialData p_material, inout PathState ps) {
+	ThinSlabCrossing crossing = get_thin_slab_crossing(h, N, V, p_material, ps.medium);
+	float reflected_share = dot(crossing.reflectance, vec3(1.0 / 3.0));
+	float transmitted_share = dot(crossing.transmittance, vec3(1.0 / 3.0));
+	float reflect_probability = reflected_share / max(reflected_share + transmitted_share, 1e-6);
+	bool reflects = rand(ps.rng_state) < reflect_probability;
+	if (reflects) {
+		ps.throughput *= crossing.reflectance / max(reflect_probability, 1e-6);
+		ps.next_ray_dir = reflect(-V, N);
+		ps.offset_normal = h.geometry_normal;
+	} else {
+		ps.throughput *= crossing.transmittance / max(1.0 - reflect_probability, 1e-6);
+		ps.next_ray_dir = crossing.transmitted_dir;
+		ps.offset_normal = -h.geometry_normal;
+		ps.medium = h.is_front_face ? p_material.inside_medium : p_material.outside_medium;
+		bool shifts_ray = (p_material.flags & RT_MAT_FLAG_SLAB_SHIFTS_RAY) != 0u;
+		if (shifts_ray) {
+			put_thin_slab_exit_in(crossing, V, ps.offset_normal, ps.exit_shift_m);
+		}
+	}
+	ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags) & ~LAST_BOUNCE_DIFFUSE_FLAG;
+}
+
 void sample_dielectric_continuation(HitData h, vec3 N, vec3 V, MaterialData surface_material, inout PathState ps) {
+	bool is_thin_slab = (surface_material.flags & RT_MAT_FLAG_THIN_SLAB) != 0u;
+	if (is_thin_slab) {
+		sample_thin_slab_continuation(h, N, V, surface_material, ps);
+		return;
+	}
 	float relative_ior = dielectric_relative_ior(h, surface_material);
 	float cos_incident = clamp(dot(N, V), 0.0, 1.0);
-	float sin_transmitted_squared = relative_ior * relative_ior * (1.0 - cos_incident * cos_incident);
-	float reflectance = 1.0;
-	float cos_transmitted = 0.0;
-	if (sin_transmitted_squared < 1.0) {
-		cos_transmitted = sqrt(1.0 - sin_transmitted_squared);
-		float s_polarised = (relative_ior * cos_incident - cos_transmitted) / (relative_ior * cos_incident + cos_transmitted);
-		float p_polarised = (cos_incident - relative_ior * cos_transmitted) / (cos_incident + relative_ior * cos_transmitted);
-		reflectance = 0.5 * (s_polarised * s_polarised + p_polarised * p_polarised);
-	}
+	float cos_transmitted;
+	float reflectance = dielectric_reflectance(relative_ior, cos_incident, cos_transmitted);
 	bool reflects = rand(ps.rng_state) < reflectance;
 	if (reflects) {
 		ps.next_ray_dir = reflect(-V, N);
@@ -1032,7 +1127,7 @@ bool dlss_rr_is_replaceable_mirror(HitData h, MaterialResult m) {
 // Guide ray hit, returned to raygen in the payload. Every hit: hit_t, diffuse albedo (packed_rt[2])
 // and specular albedo (rng_state) as unorm8. A replaceable mirror adds its exact reflection, a
 // dielectric its refraction (or reflection past the critical angle), both in next_ray_dir with
-// offset_normal on the side the walk goes on. Any other surface adds its world motion
+// offset_normal on the side the walk goes on and the medium it goes on in. Any other surface adds its world motion
 // (packed_rt[0], packed_rt[1].x), roughness (packed_rt[1].y) and normal (next_ray_dir). Raygen
 // blends albedos and maps motion through the chain.
 void dlss_rr_guide_hit(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV, uint p_flags) {
@@ -1042,12 +1137,28 @@ void dlss_rr_guide_hit(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV,
 	bool mirror = can_continue && !is_dielectric && dlss_rr_is_replaceable_mirror(h, m);
 	vec3 next_ray_dir = mirror ? reflect(-V, N) : N;
 	vec3 offset_normal = h.geometry_normal;
+	// The walk's medium past this hit, so raygen knows how each stretch of it was bent.
+	uint medium_after = payload.medium;
+	float exit_shift_m = 0.0;
 	if (is_dielectric) {
 		// Deterministic, unlike the path: always through, unless total internal reflection.
-		vec3 refracted = refract(-V, N, dielectric_relative_ior(h, entry_material));
+		bool is_thin_slab = (entry_material.flags & RT_MAT_FLAG_THIN_SLAB) != 0u;
+		ThinSlabCrossing crossing;
+		vec3 refracted;
+		if (is_thin_slab) {
+			crossing = get_thin_slab_crossing(h, N, V, entry_material, payload.medium);
+			refracted = crossing.transmitted_dir;
+		} else {
+			refracted = refract(-V, N, dielectric_relative_ior(h, entry_material));
+		}
 		bool is_totally_reflected = dot(refracted, refracted) < 0.5;
 		next_ray_dir = is_totally_reflected ? reflect(-V, N) : refracted;
 		offset_normal = is_totally_reflected ? h.geometry_normal : -h.geometry_normal;
+		medium_after = is_totally_reflected ? medium_after : (h.is_front_face ? entry_material.inside_medium : entry_material.outside_medium);
+		bool shifts_ray = is_thin_slab && !is_totally_reflected && (entry_material.flags & RT_MAT_FLAG_SLAB_SHIFTS_RAY) != 0u;
+		if (shifts_ray) {
+			put_thin_slab_exit_in(crossing, V, offset_normal, exit_shift_m);
+		}
 	}
 	bool continues = mirror || is_dielectric;
 	PathState gs;
@@ -1058,8 +1169,8 @@ void dlss_rr_guide_hit(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV,
 	gs.hit_t = gl_HitTEXT;
 	gs.offset_normal = offset_normal;
 	gs.next_ray_dir = next_ray_dir;
-	gs.medium = 0u;
-	gs.exit_shift_m = 0.0;
+	gs.medium = medium_after;
+	gs.exit_shift_m = exit_shift_m;
 	path_pack(payload, gs);
 	vec3 motion = continues ? vec3(0.0) : rt_hit_prev_world_pos(h.hit_pos) - h.hit_pos;
 	payload.packed_rt[0] = packHalf2x16(motion.xy);
@@ -1201,6 +1312,20 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			bool premultiplied = bclass == RT_BLEND_CLASS_PREMULT;
 			if (primary_first_layer && (dominant || premultiplied)) {
 				dlss_rr_composite_peel_guides(h, m, N, V, NdotV, depth_barrier ? material_alpha : peel_alpha, premultiplied);
+			}
+			// Seen straight through the primary glass or water, the first dominant layer owns the pixel as on the
+			// primary segment. Left to the surface behind it, mucus drifting in a tank took the still rock's
+			// motion and smeared. Raygen finishes its motion and depth at its apparent place, as for an opaque
+			// hit (dlss_rr_finish_transmitted_guides), when it sees the flag gone.
+			bool is_first_layer_seen_through_primary = (ps.packed_bounces_flags & DLSS_RR_TRANSMIT_PENDING_FLAG) != 0u &&
+					is_sample_zero(ps.packed_bounces_flags) && (ps.packed_bounces_flags & PEEL_FIRST_LAYER_FLAG) != 0u;
+			if (is_first_layer_seen_through_primary && dominant) {
+				ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+				dlss_rr_composite_peel_guides(h, m, N, V, NdotV, depth_barrier ? material_alpha : peel_alpha, premultiplied);
+				vec3 motion = rt_hit_prev_world_pos(h.hit_pos) - h.hit_pos;
+				imageStore(rt_velocity_image, pixel, vec4(motion.xy, 0.0, 0.0));
+				imageStore(rt_depth_image, pixel, vec4(motion.z));
+				ps.packed_bounces_flags &= ~DLSS_RR_TRANSMIT_PENDING_FLAG;
 			}
 #endif
 		}

@@ -89,6 +89,16 @@ params;
 #ifdef MODE_COPY_DEPTH
 layout(location = 0) in vec2 uv_interp;
 layout(set = 0, binding = 0) uniform sampler2D source_depth;
+#elif defined(MODE_COPY_COLOR_AND_SAMPLE_DEPTHS)
+layout(location = 0) in vec2 uv_interp;
+layout(set = 0, binding = 0) uniform sampler2D source_color;
+// source_sample_depths holds each pixel's four sample depths in a 2 x 2 block, sample i at (i & 1, i >> 1).
+layout(set = 1, binding = 0) uniform sampler2D source_sample_depths;
+layout(location = 0) out vec4 frag_color;
+#elif defined(MODE_RESOLVE_HDR_MSAA)
+layout(location = 0) in vec2 uv_interp;
+layout(set = 0, binding = 0) uniform sampler2DMS source_msaa_color;
+layout(location = 0) out vec4 frag_color;
 #else /* !MODE_COPY_DEPTH */
 #ifndef MODE_SET_COLOR
 #ifdef USE_MULTIVIEW
@@ -126,6 +136,24 @@ vec3 srgb_to_linear(vec3 color) {
 void main() {
 #if defined(MODE_COPY_DEPTH)
 	gl_FragDepth = textureLod(source_depth, uv_interp, 0.0).r;
+	return;
+#elif defined(MODE_COPY_COLOR_AND_SAMPLE_DEPTHS)
+	ivec2 pixel = ivec2(gl_FragCoord.xy);
+	ivec2 sample_texel = pixel * 2 + ivec2(gl_SampleID & 1, gl_SampleID >> 1);
+	frag_color = texelFetch(source_color, pixel, 0);
+	gl_FragDepth = texelFetch(source_sample_depths, sample_texel, 0).r;
+	return;
+#elif defined(MODE_RESOLVE_HDR_MSAA)
+	ivec2 pixel = ivec2(gl_FragCoord.xy);
+	vec4 weighted_sum = vec4(0.0);
+	float weight_sum = 0.0;
+	for (int sample_index = 0; sample_index < 4; sample_index++) {
+		vec4 sample_color = texelFetch(source_msaa_color, pixel, sample_index);
+		float weight = 1.0 / (1.0 + max(sample_color.r, max(sample_color.g, sample_color.b)));
+		weighted_sum += sample_color * weight;
+		weight_sum += weight;
+	}
+	frag_color = weighted_sum / weight_sum;
 	return;
 #elif defined(MODE_SET_COLOR)
 	frag_color = params.color;

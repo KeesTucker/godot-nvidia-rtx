@@ -1164,6 +1164,9 @@ public:
 		// Raytracing: wider AABB cull volume for TLAS and light gathering.
 		bool rt_enabled = false;
 		AABB rt_aabb;
+		// rt_raster_overlay_layers keeps instances on these layers out of the TLAS; the path-traced renderer
+		// rasterizes them over the upscaled frame instead.
+		uint32_t rt_raster_overlay_layers = 0;
 	} cull;
 
 	struct VisibilityCullData {

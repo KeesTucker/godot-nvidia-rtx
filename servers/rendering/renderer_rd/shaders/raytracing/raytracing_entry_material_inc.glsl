@@ -25,6 +25,10 @@ vec3 rt_shadow_dielectric_crossing_transmittance(MaterialData p_mat, bool p_is_f
 	uint left_medium = p_is_front_face ? p_mat.outside_medium : p_mat.inside_medium;
 	vec3 extinction_change = rt_medium_extinction(entered_medium) - rt_medium_extinction(left_medium);
 	float rest_of_ray = max(p_ray_end_t - p_hit_t, 0.0);
-	return exp(-extinction_change * rest_of_ray);
+	// A thin slab's pane absorbs too, taken square on: the any-hit doesn't know the angle.
+	bool is_thin_slab = (p_mat.flags & RT_MAT_FLAG_THIN_SLAB) != 0u;
+	float across_slab_m = is_thin_slab ? p_mat.slab_thickness_m : 0.0;
+	vec3 slab_extinction = is_thin_slab ? rt_medium_extinction(p_mat.slab_medium) : vec3(0.0);
+	return exp(-extinction_change * rest_of_ray - slab_extinction * across_slab_m);
 }
 #endif

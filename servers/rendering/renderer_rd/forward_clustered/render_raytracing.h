@@ -49,6 +49,9 @@
 
 #define RB_TEX_RAYTRACING SNAME("raytracing")
 #define RB_TEX_RT_DEPTH SNAME("rt_depth")
+#define RB_SCOPE_RT_RASTER_OVERLAY SNAME("rt_raster_overlay")
+#define RB_TEX_RT_RASTER_OVERLAY_DEPTH SNAME("depth")
+#define RB_TEX_RT_RASTER_OVERLAY_COVERAGE SNAME("coverage")
 #define RB_TEX_RT_SKY SNAME("rt_sky")
 
 #define RB_SCOPE_RT_TIMING SNAME("rt_timing")
@@ -228,9 +231,13 @@ struct alignas(16) RT_MaterialData {
 	uint32_t outside_medium;
 	// The clear coat's index of refraction (`uniform float rt_clearcoat_index_of_refraction`).
 	float clearcoat_index_of_refraction;
-	uint32_t medium_padding;
+	// A RT_MAT_FLAG_THIN_SLAB surface stands for a flat pane this thick of this medium (`uniform int
+	// rt_slab_medium`, `uniform float rt_slab_thickness_m`), between inside_medium and outside_medium.
+	uint32_t slab_medium;
+	float slab_thickness_m;
+	uint32_t slab_padding[3]; // std430 rounds the struct up to 16 bytes.
 };
-static_assert(sizeof(RT_MaterialData) == 144, "RT_MaterialData must be 144 bytes for std430, with every bitfield struct in one uint");
+static_assert(sizeof(RT_MaterialData) == 160, "RT_MaterialData must be 160 bytes for std430, with every bitfield struct in one uint");
 static_assert(BindlessBlock::MAX_BINDLESS_TEXTURES <= (1u << RT_MaterialData::TEXTURE_INDEX_BITS), "Bindless texture indices must fit RT_MaterialData textures");
 
 // p_value clamped to [0, 1] as GLSL unpackUnorm4x8() reads one byte.
@@ -460,6 +467,11 @@ enum {
 	RT_MAT_FLAG_INSTANCE_FADE = 131072u,
 	// Refracts: a shader opted in with `uniform float rt_index_of_refraction`.
 	RT_MAT_FLAG_DIELECTRIC = 262144u,
+	// A dielectric that stands for a whole flat pane in one hit (see RT_MaterialData::slab_medium).
+	RT_MAT_FLAG_THIN_SLAB = 524288u,
+	// A thin slab's transmitted ray carries on from where it would leave the pane's far face
+	// (`uniform bool rt_slab_shifts_ray`), not from the hit.
+	RT_MAT_FLAG_SLAB_SHIFTS_RAY = 1048576u,
 	// Multi-bit fields fill the top bits so new single-bit flags can grow upward.
 	// Blend class of transparent surfaces (bits 25-27); opaque surfaces leave 0.
 	RT_MAT_BLEND_CLASS_SHIFT = 25u,
@@ -1121,6 +1133,9 @@ struct RTViewportState {
 	RID light_buffer;
 	RID params_buffer;
 	RID scene_uniform_set;
+	// raster_overlay_depth_uniform_set is scene_uniform_set with the raster overlay's sample depth as the depth
+	// image and its coverage bound, for its depth only launch.
+	RID raster_overlay_depth_uniform_set;
 
 	RID fog_shadows_ubo;
 	RID fog_shadows_uniform_set;
@@ -1407,6 +1422,7 @@ class RenderRaytracing {
 	// Material UBO sub-allocation pool. One large device-address buffer divided
 	// into fixed-size slots for performance reasons, and easier to debug.
 	RID mat_ubo_pool_buffer;
+	RID raster_overlay_coverage_stand_in;
 	uint64_t mat_ubo_pool_bda = 0;
 	LocalVector<uint32_t> mat_ubo_pool_free_slots;
 	uint32_t mat_ubo_pool_free_count = 0;
@@ -1553,6 +1569,7 @@ public:
 	uint32_t gather_lights(const RenderDataRD *p_render_data, const RTViewportState *p_state, RT_LightData *r_light_data, uint32_t p_max_lights);
 	void update_scene_ubo(RTViewportState *p_state, const RenderDataRD *p_render_data, const Size2i &p_screen_size, const Color &p_default_bg_color);
 	RID update_uniform_set(RTViewportState *p_state, const RenderDataRD *p_render_data, uint32_t p_rt_flags);
+	RID get_raster_overlay_depth_uniform_set(const RTViewportState *p_state) const { return p_state ? p_state->raster_overlay_depth_uniform_set : RID(); }
 
 	void copy_output_texture(const RenderDataRD *p_render_data);
 	void free_viewport_state(RenderSceneBuffersRD *p_render_buffers);
@@ -1563,6 +1580,13 @@ public:
 	RID rt_get_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	bool rt_has_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	RID rt_get_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
+
+	// The raster overlay's depth, traced at its 4x MSAA samples, and the coverage that says which to trace. A zero
+	// output size frees them.
+	void rt_set_raster_overlay_output_size(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_output_size);
+	bool rt_has_raster_overlay_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
+	RID rt_get_raster_overlay_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
+	RID rt_get_raster_overlay_coverage_texture(RenderSceneBuffersRD *p_render_buffers) const;
 
 	// Screen-space sky, drawn before the trace so primary-ray misses can read
 	// the real sky shader instead of the prefiltered radiance octmap.
