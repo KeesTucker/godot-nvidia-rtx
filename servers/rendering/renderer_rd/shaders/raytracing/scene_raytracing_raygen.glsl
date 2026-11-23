@@ -302,31 +302,14 @@ vec3 dlss_rr_get_perpendicular(vec3 p_dir) {
 // A miss within DLSS_RR_REPROJECTION_MISS_M of the point counts as found.
 #define DLSS_RR_REPROJECTION_MISS_M 1e-4
 
-// dlss_rr_reproject_through_crossings is the motion vector of a point seen through flat crossings: from this
-// pixel's camera ray (through p_apparent_pos) to the ray from last frame's camera that, bent by the same crossings,
-// meets p_prev_pos. The apparent point is right for where a point looks but not for how it moves: past a slanted
-// pane the image swings as if much nearer the glass, so at steep angles its motion vectors dragged Ray
-// Reconstruction's history across whatever was behind. False if it doesn't settle; use the apparent point then.
-bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_camera_position, vec3 p_apparent_pos, vec3 p_apparent_prev_pos, vec3 p_prev_pos, out vec2 r_mv) {
-	r_mv = vec2(0.0);
-	bool has_crossings = p_crossings.index_ratios.x != 0.0;
-	if (p_crossings.is_unusable || !has_crossings) {
-		return false;
-	}
-	vec3 prev_camera;
-	if (!dlss_rr_get_prev_camera_position(p_camera_position, prev_camera)) {
-		return false;
-	}
-	// Nothing moved, so the apparent point's estimate is exact; the solve would only add its own rounding noise.
-	bool is_nothing_moving = prev_camera == p_camera_position && p_apparent_prev_pos == p_apparent_pos;
-	if (is_nothing_moving) {
-		return false;
-	}
-	// The apparent point's own motion is a close first guess.
-	vec3 dir = normalize(p_apparent_prev_pos - prev_camera);
+// dlss_rr_solve_through_crossings turns p_guess_dir until the ray from p_camera_position, bent by the crossings,
+// meets p_target. False if it doesn't settle.
+bool dlss_rr_solve_through_crossings(DlssRrCrossings p_crossings, vec3 p_camera_position, vec3 p_guess_dir, vec3 p_target, out vec3 r_dir) {
+	vec3 dir = p_guess_dir;
+	r_dir = dir;
 	vec3 turn_a = dlss_rr_get_perpendicular(dir);
 	vec3 turn_b = cross(dir, turn_a);
-	vec3 bent_origin = prev_camera;
+	vec3 bent_origin = p_camera_position;
 	vec3 bent_dir = dir;
 	if (!dlss_rr_cross_planes(p_crossings, bent_origin, bent_dir)) {
 		return false;
@@ -336,7 +319,7 @@ bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_cam
 	const float TURN_STEP_RADIANS = 1e-4;
 	vec2 miss = vec2(0.0);
 	for (uint newton_step = 0u; newton_step < DLSS_RR_REPROJECTION_STEPS; newton_step++) {
-		if (!dlss_rr_get_miss(p_crossings, prev_camera, dir, p_prev_pos, across_a, across_b, miss)) {
+		if (!dlss_rr_get_miss(p_crossings, p_camera_position, dir, p_target, across_a, across_b, miss)) {
 			return false;
 		}
 		if (length(miss) < DLSS_RR_REPROJECTION_MISS_M * 0.01) {
@@ -344,8 +327,8 @@ bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_cam
 		}
 		vec2 miss_turned_a;
 		vec2 miss_turned_b;
-		bool is_turned_a_clear = dlss_rr_get_miss(p_crossings, prev_camera, normalize(dir + turn_a * TURN_STEP_RADIANS), p_prev_pos, across_a, across_b, miss_turned_a);
-		bool is_turned_b_clear = dlss_rr_get_miss(p_crossings, prev_camera, normalize(dir + turn_b * TURN_STEP_RADIANS), p_prev_pos, across_a, across_b, miss_turned_b);
+		bool is_turned_a_clear = dlss_rr_get_miss(p_crossings, p_camera_position, normalize(dir + turn_a * TURN_STEP_RADIANS), p_target, across_a, across_b, miss_turned_a);
+		bool is_turned_b_clear = dlss_rr_get_miss(p_crossings, p_camera_position, normalize(dir + turn_b * TURN_STEP_RADIANS), p_target, across_a, across_b, miss_turned_b);
 		if (!is_turned_a_clear || !is_turned_b_clear) {
 			return false;
 		}
@@ -356,12 +339,44 @@ bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_cam
 		vec2 turn = inverse(miss_per_turn) * miss;
 		dir = normalize(dir - turn_a * turn.x - turn_b * turn.y);
 	}
-	if (!dlss_rr_get_miss(p_crossings, prev_camera, dir, p_prev_pos, across_a, across_b, miss) || length(miss) > DLSS_RR_REPROJECTION_MISS_M) {
+	if (!dlss_rr_get_miss(p_crossings, p_camera_position, dir, p_target, across_a, across_b, miss) || length(miss) > DLSS_RR_REPROJECTION_MISS_M) {
+		return false;
+	}
+	r_dir = dir;
+	return true;
+}
+
+// dlss_rr_reproject_through_crossings is the motion vector of a point seen through flat crossings: from the ray
+// from this frame's camera to the ray from last frame's camera that, bent by the same crossings, meets the point.
+// The apparent point is right for where a point looks but not for how it moves: past a slanted pane the image
+// swings as if much nearer the glass, so at steep angles its motion vectors dragged Ray Reconstruction's history
+// across whatever was behind. False if it doesn't settle; use the apparent point then.
+bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_camera_position, vec3 p_apparent_pos, vec3 p_apparent_prev_pos, vec3 p_world_pos, vec3 p_prev_pos, out vec2 r_mv) {
+	r_mv = vec2(0.0);
+	bool has_crossings = p_crossings.index_ratios.x != 0.0;
+	if (p_crossings.is_unusable || !has_crossings) {
+		return false;
+	}
+	vec3 prev_camera;
+	if (!dlss_rr_get_prev_camera_position(p_camera_position, prev_camera)) {
+		return false;
+	}
+	// Nothing moved, so the apparent point's estimate is exact and the solves can be skipped.
+	bool is_nothing_moving = prev_camera == p_camera_position && p_apparent_prev_pos == p_apparent_pos;
+	if (is_nothing_moving) {
+		return false;
+	}
+	// Both ends are solved, not just last frame's: replaying the crossings lands a hair off where the walk did, and
+	// against the apparent point that hair showed as swirling motion on still things. Solved both ways, it cancels.
+	vec3 dir;
+	vec3 prev_dir;
+	bool has_solved_now = dlss_rr_solve_through_crossings(p_crossings, p_camera_position, normalize(p_apparent_pos - p_camera_position), p_world_pos, dir);
+	if (!has_solved_now || !dlss_rr_solve_through_crossings(p_crossings, prev_camera, normalize(p_apparent_prev_pos - prev_camera), p_prev_pos, prev_dir)) {
 		return false;
 	}
 	// Projected as far out as the apparent point, so the two projections round the same way.
 	float apparent_distance_m = distance(p_apparent_pos, p_camera_position);
-	r_mv = project_uv(prev_camera + dir * apparent_distance_m, prev_vp_unjittered) - project_uv(p_apparent_pos, curr_vp_unjittered);
+	r_mv = project_uv(prev_camera + prev_dir * apparent_distance_m, prev_vp_unjittered) - project_uv(p_camera_position + dir * apparent_distance_m, curr_vp_unjittered);
 	return true;
 }
 
@@ -369,7 +384,7 @@ bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_cam
 // apparent point by p_motion.
 vec2 dlss_rr_get_motion_vector_through_crossings(DlssRrCrossings p_crossings, vec3 p_camera_position, vec3 p_apparent_pos, vec3 p_world_pos, vec3 p_motion, vec3 p_apparent_motion) {
 	vec2 mv;
-	if (dlss_rr_reproject_through_crossings(p_crossings, p_camera_position, p_apparent_pos, p_apparent_pos + p_apparent_motion, p_world_pos + p_motion, mv)) {
+	if (dlss_rr_reproject_through_crossings(p_crossings, p_camera_position, p_apparent_pos, p_apparent_pos + p_apparent_motion, p_world_pos, p_world_pos + p_motion, mv)) {
 		return mv;
 	}
 	return rt_motion_vector(p_apparent_pos, p_apparent_pos + p_apparent_motion);
