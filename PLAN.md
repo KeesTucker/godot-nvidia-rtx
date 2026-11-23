@@ -159,6 +159,21 @@ Two smaller things from the same session:
   opaque black lid. Fall back to the shader's default, as the source_color
   bug above wants for colours.
 
+## Come back to: feature/tank-perf
+
+`feature/tank-perf` (0421cf4, worktree `../godot-nvidia-rtx-tank-perf`) and seagrass-tank's own `feature/tank-perf`
+(c06570d, worktree `~/Projects/seagrass-tank-perf`), from 2026-11-15. Kept on purpose, not merged:
+
+- Glass and water cost no bounce (up to 6 crossings a path), and a hit on clear glass carries on to its far face with
+  a ray query. It measured slower: 86.5 fps at 1 bounce against 92 on the old engine at 3, as more bounce light
+  reaches the room. The thin dielectric slabs (on main since 91483d0) now do the pane half of it.
+- Worth picking out: the per-pixel motion vector view (`debug_motion_vectors_per_pixel`, F3 in the tank; its hue
+  wraps at "moving left"), and `TankMedia.get_medium_at()` telling the path tracer the camera's medium.
+- Open there: side panes got bogus vertical motion vectors in bands on a still scene.
+
+Both branches are behind main, so rebase rather than merge, and measure against main before keeping any of it.
+seagrass-tank's PLAN.md ("Frame rate pass (2026-11-15)" on that branch) has the numbers.
+
 ## Later
 
 Opacity micromaps, linear swept spheres, cluster/partitioned acceleration
