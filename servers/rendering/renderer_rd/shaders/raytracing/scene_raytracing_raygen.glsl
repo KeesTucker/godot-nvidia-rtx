@@ -317,6 +317,11 @@ bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_cam
 	if (!dlss_rr_get_prev_camera_position(p_camera_position, prev_camera)) {
 		return false;
 	}
+	// Nothing moved, so the apparent point's estimate is exact; the solve would only add its own rounding noise.
+	bool is_nothing_moving = prev_camera == p_camera_position && p_apparent_prev_pos == p_apparent_pos;
+	if (is_nothing_moving) {
+		return false;
+	}
 	// The apparent point's own motion is a close first guess.
 	vec3 dir = normalize(p_apparent_prev_pos - prev_camera);
 	vec3 turn_a = dlss_rr_get_perpendicular(dir);
