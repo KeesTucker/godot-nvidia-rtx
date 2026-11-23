@@ -3235,6 +3235,10 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 				const SceneShaderRaytracing::TextureUniformInfo &tui = cse->texture_uniforms[ti];
 				uint32_t bindless_idx = 0;
 
+				// A 3D texture in the texture2D array fails the whole bindless set, and every trace with it.
+				if (!tui.is_2d) {
+					continue;
+				}
 				if (tui.is_global) {
 					RID tex_rid = material_storage->global_shader_uniform_get_texture(tui.name);
 					if (tex_rid.is_valid()) {

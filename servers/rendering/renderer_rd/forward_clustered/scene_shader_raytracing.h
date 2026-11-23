@@ -437,6 +437,8 @@ public:
 		ShaderLanguage::ShaderNode::Uniform::Hint hint = ShaderLanguage::ShaderNode::Uniform::HINT_NONE;
 		bool use_color = false;
 		bool is_global = false;
+		// is_2d is false for a 3D, array or cube texture, which the bindless texture2D array can't hold.
+		bool is_2d = true;
 		uint32_t buffer_offset = 0; // Stored as bindless index in UBO
 	};
 
