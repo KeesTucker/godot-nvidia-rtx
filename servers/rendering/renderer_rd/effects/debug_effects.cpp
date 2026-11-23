@@ -30,6 +30,7 @@
 
 #include "debug_effects.h"
 
+#include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -364,7 +365,9 @@ void DebugEffects::draw_motion_vectors(RID p_velocity, RID p_depth, RID p_dest_f
 
 	motion_vectors.push_constant.resolution[0] = p_resolution.width;
 	motion_vectors.push_constant.resolution[1] = p_resolution.height;
-	motion_vectors.push_constant.force_derive_from_depth = false;
+	// Bit 1 of the flags colours every pixel by its motion vector, instead of drawing arrows.
+	const bool per_pixel = GLOBAL_GET("rendering/pathtracing/debug_motion_vectors_per_pixel");
+	motion_vectors.push_constant.force_derive_from_depth = per_pixel ? 2u : 0u;
 	motion_vectors.push_constant.reference_length = has_reference ? 0.5f : 0.0f;
 
 	RID shader = motion_vectors.shader.version_get_shader(motion_vectors.shader_version, 0);

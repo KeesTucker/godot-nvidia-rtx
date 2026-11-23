@@ -46,7 +46,29 @@ float line_segment(in vec2 p, in vec2 a, in vec2 b) {
 	return length(pa - h * ba) * (params.resolution.y / 2.0f);
 }
 
+// Hue is the way the pixel moved, round the whole colour wheel so neighbouring ways get
+// neighbouring colours, and brightness how far: full at 4 rendered pixels a frame, on a curve
+// that keeps a twentieth of a pixel visible. A still pixel is black, NaN is white.
+vec4 motion_vector_colour(vec2 p_velocity_uv) {
+	if (any(isnan(p_velocity_uv))) {
+		return vec4(1.0f);
+	}
+	vec2 velocity_px = p_velocity_uv * params.resolution;
+	float speed_px = length(velocity_px);
+	if (speed_px < 1e-4f) {
+		return vec4(0.0f);
+	}
+	float hue = atan(velocity_px.y, velocity_px.x) / 6.2831853f + 0.5f;
+	vec3 pure = clamp(abs(fract(hue + vec3(0.0f, 2.0f / 3.0f, 1.0f / 3.0f)) * 6.0f - 3.0f) - 1.0f, 0.0f, 1.0f);
+	return vec4(pure * clamp(pow(speed_px / 4.0f, 0.4f), 0.15f, 1.0f), 1.0f);
+}
+
 void main() {
+	bool colours_every_pixel = (params.force_derive_from_depth & 2u) != 0u;
+	if (colours_every_pixel) {
+		frag_color = motion_vector_colour(textureLod(source_velocity, uv_interp, 0.0f).xy);
+		return;
+	}
 	// Retrieve motion vector data.
 	float cell_size = 32.0f;
 	float circle_radius = 2.0f;
@@ -57,7 +79,7 @@ void main() {
 	vec2 cell_pos_pixel = floor(pos_pixel / cell_size) * cell_size + (cell_size * 0.5f);
 	vec2 cell_pos_uv = cell_pos_pixel / params.resolution;
 	vec2 cell_pos_velocity = textureLod(source_velocity, cell_pos_uv, 0.0f).xy;
-	bool derive_velocity = bool(params.force_derive_from_depth) || all(lessThanEqual(cell_pos_velocity, vec2(-1.0f, -1.0f)));
+	bool derive_velocity = (params.force_derive_from_depth & 1u) != 0u || all(lessThanEqual(cell_pos_velocity, vec2(-1.0f, -1.0f)));
 	if (derive_velocity) {
 		float depth = textureLod(source_depth, cell_pos_uv, 0.0f).x;
 		cell_pos_velocity = derive_motion_vector(cell_pos_uv, depth, params.reprojection_matrix);
