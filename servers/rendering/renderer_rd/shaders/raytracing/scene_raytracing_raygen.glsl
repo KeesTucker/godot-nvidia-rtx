@@ -187,6 +187,173 @@ float dlss_rr_apparent_length(float p_length, uint p_medium) {
 	return p_length * rt_medium_index_of_refraction(rt_camera_medium()) / rt_medium_index_of_refraction(p_medium);
 }
 
+// DlssRrCrossings is the flat interfaces a camera ray went straight through on its way to the surface it shows: a
+// thin pane, both faces of thick glass, or the water's surface. Each plane's normal points the way the ray went and
+// w is how far along it the plane sits; each index ratio is the index before over the index after, 0 with no plane.
+struct DlssRrCrossings {
+	vec4 planes[2];
+	vec2 index_ratios;
+	// is_unusable is set by a third crossing or a mirror, which the reprojection doesn't follow.
+	bool is_unusable;
+};
+
+DlssRrCrossings dlss_rr_no_crossings() {
+	DlssRrCrossings crossings;
+	crossings.planes[0] = vec4(0.0);
+	crossings.planes[1] = vec4(0.0);
+	crossings.index_ratios = vec2(0.0);
+	crossings.is_unusable = false;
+	return crossings;
+}
+
+void dlss_rr_add_crossing(inout DlssRrCrossings r_crossings, vec3 p_hit_pos, vec3 p_normal_along_way, uint p_medium_before, uint p_medium_after) {
+	float index_ratio = rt_medium_index_of_refraction(p_medium_before) / rt_medium_index_of_refraction(p_medium_after);
+	vec4 plane = vec4(p_normal_along_way, dot(p_normal_along_way, p_hit_pos));
+	if (r_crossings.index_ratios.x == 0.0) {
+		r_crossings.planes[0] = plane;
+		r_crossings.index_ratios.x = index_ratio;
+	} else if (r_crossings.index_ratios.y == 0.0) {
+		r_crossings.planes[1] = plane;
+		r_crossings.index_ratios.y = index_ratio;
+	} else {
+		r_crossings.is_unusable = true;
+	}
+}
+
+// dlss_rr_cross_planes carries a ray through the crossings in order, bending it at each. False if it misses one or
+// reflects inside.
+bool dlss_rr_cross_planes(DlssRrCrossings p_crossings, inout vec3 r_origin, inout vec3 r_dir) {
+	for (uint crossing = 0u; crossing < 2u; crossing++) {
+		float index_ratio = p_crossings.index_ratios[crossing];
+		if (index_ratio == 0.0) {
+			break;
+		}
+		vec3 normal_along_way = p_crossings.planes[crossing].xyz;
+		float approach = dot(normal_along_way, r_dir);
+		if (approach <= 1e-6) {
+			return false;
+		}
+		float distance_to_plane = (p_crossings.planes[crossing].w - dot(normal_along_way, r_origin)) / approach;
+		if (distance_to_plane < 0.0) {
+			return false;
+		}
+		r_origin += r_dir * distance_to_plane;
+		r_dir = refract(r_dir, -normal_along_way, index_ratio);
+		bool is_reflected_inside = dot(r_dir, r_dir) == 0.0;
+		if (is_reflected_inside) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// dlss_rr_get_miss is how far a ray through the crossings passes p_target, measured across p_across_a and p_across_b.
+bool dlss_rr_get_miss(DlssRrCrossings p_crossings, vec3 p_origin, vec3 p_dir, vec3 p_target, vec3 p_across_a, vec3 p_across_b, out vec2 r_miss) {
+	vec3 origin = p_origin;
+	vec3 dir = p_dir;
+	r_miss = vec2(0.0);
+	if (!dlss_rr_cross_planes(p_crossings, origin, dir)) {
+		return false;
+	}
+	vec3 to_target = p_target - origin;
+	vec3 off_ray = to_target - dir * dot(to_target, dir);
+	r_miss = vec2(dot(off_ray, p_across_a), dot(off_ray, p_across_b));
+	return true;
+}
+
+// dlss_rr_get_prev_camera_position is where last frame's camera sat: the point its projection takes to the middle of
+// the screen at w = 0. False for an orthogonal camera, which has no such point.
+bool dlss_rr_get_prev_camera_position(out vec3 r_position) {
+	mat4 prev_vp = prev_vp_unjittered;
+	vec4 row_x = vec4(prev_vp[0][0], prev_vp[1][0], prev_vp[2][0], prev_vp[3][0]);
+	vec4 row_y = vec4(prev_vp[0][1], prev_vp[1][1], prev_vp[2][1], prev_vp[3][1]);
+	vec4 row_w = vec4(prev_vp[0][3], prev_vp[1][3], prev_vp[2][3], prev_vp[3][3]);
+	mat3 rows = transpose(mat3(row_x.xyz, row_y.xyz, row_w.xyz));
+	r_position = vec3(0.0);
+	if (abs(determinant(rows)) < 1e-12) {
+		return false;
+	}
+	r_position = inverse(rows) * -vec3(row_x.w, row_y.w, row_w.w);
+	return true;
+}
+
+// dlss_rr_get_perpendicular is a unit vector square to p_dir.
+vec3 dlss_rr_get_perpendicular(vec3 p_dir) {
+	vec3 other = abs(p_dir.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	return normalize(cross(p_dir, other));
+}
+
+// DLSS_RR_REPROJECTION_STEPS Newton steps settle a pane and the water in two or three; the rest is margin.
+#define DLSS_RR_REPROJECTION_STEPS 4u
+// A miss within DLSS_RR_REPROJECTION_MISS_M of the point counts as found.
+#define DLSS_RR_REPROJECTION_MISS_M 1e-4
+
+// dlss_rr_reproject_through_crossings is the motion vector of a point seen through flat crossings: from this
+// pixel's camera ray (through p_apparent_pos) to the ray from last frame's camera that, bent by the same crossings,
+// meets p_prev_pos. The apparent point is right for where a point looks but not for how it moves: past a slanted
+// pane the image swings as if much nearer the glass, so at steep angles its motion vectors dragged Ray
+// Reconstruction's history across whatever was behind. False if it doesn't settle; use the apparent point then.
+bool dlss_rr_reproject_through_crossings(DlssRrCrossings p_crossings, vec3 p_apparent_pos, vec3 p_apparent_prev_pos, vec3 p_prev_pos, out vec2 r_mv) {
+	r_mv = vec2(0.0);
+	bool has_crossings = p_crossings.index_ratios.x != 0.0;
+	if (p_crossings.is_unusable || !has_crossings) {
+		return false;
+	}
+	vec3 prev_camera;
+	if (!dlss_rr_get_prev_camera_position(prev_camera)) {
+		return false;
+	}
+	// The apparent point's own motion is a close first guess.
+	vec3 dir = normalize(p_apparent_prev_pos - prev_camera);
+	vec3 turn_a = dlss_rr_get_perpendicular(dir);
+	vec3 turn_b = cross(dir, turn_a);
+	vec3 bent_origin = prev_camera;
+	vec3 bent_dir = dir;
+	if (!dlss_rr_cross_planes(p_crossings, bent_origin, bent_dir)) {
+		return false;
+	}
+	vec3 across_a = dlss_rr_get_perpendicular(bent_dir);
+	vec3 across_b = cross(bent_dir, across_a);
+	const float TURN_STEP_RADIANS = 1e-4;
+	vec2 miss = vec2(0.0);
+	for (uint newton_step = 0u; newton_step < DLSS_RR_REPROJECTION_STEPS; newton_step++) {
+		if (!dlss_rr_get_miss(p_crossings, prev_camera, dir, p_prev_pos, across_a, across_b, miss)) {
+			return false;
+		}
+		if (length(miss) < DLSS_RR_REPROJECTION_MISS_M * 0.01) {
+			break;
+		}
+		vec2 miss_turned_a;
+		vec2 miss_turned_b;
+		bool is_turned_a_clear = dlss_rr_get_miss(p_crossings, prev_camera, normalize(dir + turn_a * TURN_STEP_RADIANS), p_prev_pos, across_a, across_b, miss_turned_a);
+		bool is_turned_b_clear = dlss_rr_get_miss(p_crossings, prev_camera, normalize(dir + turn_b * TURN_STEP_RADIANS), p_prev_pos, across_a, across_b, miss_turned_b);
+		if (!is_turned_a_clear || !is_turned_b_clear) {
+			return false;
+		}
+		mat2 miss_per_turn = mat2((miss_turned_a - miss) / TURN_STEP_RADIANS, (miss_turned_b - miss) / TURN_STEP_RADIANS);
+		if (abs(determinant(miss_per_turn)) < 1e-12) {
+			return false;
+		}
+		vec2 turn = inverse(miss_per_turn) * miss;
+		dir = normalize(dir - turn_a * turn.x - turn_b * turn.y);
+	}
+	if (!dlss_rr_get_miss(p_crossings, prev_camera, dir, p_prev_pos, across_a, across_b, miss) || length(miss) > DLSS_RR_REPROJECTION_MISS_M) {
+		return false;
+	}
+	r_mv = project_uv(prev_camera + dir, prev_vp_unjittered) - project_uv(p_apparent_pos, curr_vp_unjittered);
+	return true;
+}
+
+// dlss_rr_get_motion_vector_through_crossings reprojects through the crossings where it can, and otherwise moves the
+// apparent point by p_motion.
+vec2 dlss_rr_get_motion_vector_through_crossings(DlssRrCrossings p_crossings, vec3 p_apparent_pos, vec3 p_world_pos, vec3 p_motion, vec3 p_apparent_motion) {
+	vec2 mv;
+	if (dlss_rr_reproject_through_crossings(p_crossings, p_apparent_pos, p_apparent_pos + p_apparent_motion, p_world_pos + p_motion, mv)) {
+		return mv;
+	}
+	return rt_motion_vector(p_apparent_pos, p_apparent_pos + p_apparent_motion);
+}
+
 // dlss_rr_replace_through_primary_dielectric gives a primary glass or water hit the guides of the
 // surface seen through it: its depth, motion, normal, roughness and albedos. A guide ray walks from
 // the camera, refracting through dielectrics and reflecting off mirrors, to the first other surface.
@@ -199,6 +366,8 @@ struct SmoothHitWalk {
 	PathState result;
 	float scene_length; // How far along the camera ray the surface looks (dlss_rr_apparent_length).
 	mat3 image_xform; // World to the image space of the mirrors along the walk.
+	vec3 hit_pos; // Where the walk reached the surface.
+	DlssRrCrossings crossings;
 };
 
 // dlss_rr_walk_through_smooth_hits walks a guide ray from p_origin, refracting through dielectrics and
@@ -209,6 +378,8 @@ SmoothHitWalk dlss_rr_walk_through_smooth_hits(vec3 p_origin, vec3 p_dir) {
 	walk.has_reached = false;
 	walk.scene_length = 0.0;
 	walk.image_xform = mat3(1.0);
+	walk.hit_pos = vec3(0.0);
+	walk.crossings = dlss_rr_no_crossings();
 	vec3 ray_origin = p_origin;
 	vec3 ray_dir = p_dir;
 
@@ -243,6 +414,11 @@ SmoothHitWalk dlss_rr_walk_through_smooth_hits(vec3 p_origin, vec3 p_dir) {
 			if (!went_through && dot(mirror_axis, mirror_axis) > 1e-10) {
 				walk.image_xform = walk.image_xform * dlss_rr_householder(normalize(mirror_axis));
 			}
+			if (went_through) {
+				dlss_rr_add_crossing(walk.crossings, ray_origin + ray_dir * result.hit_t, result.offset_normal, gs.medium, result.medium);
+			} else {
+				walk.crossings.is_unusable = true;
+			}
 			ray_origin = get_next_ray_origin(ray_origin + ray_dir * result.hit_t, result);
 			ray_dir = result.next_ray_dir;
 			gs.medium = result.medium;
@@ -250,6 +426,7 @@ SmoothHitWalk dlss_rr_walk_through_smooth_hits(vec3 p_origin, vec3 p_dir) {
 		}
 		walk.has_reached = true;
 		walk.result = result;
+		walk.hit_pos = ray_origin + ray_dir * result.hit_t;
 		return walk;
 	}
 	return walk;
@@ -269,7 +446,7 @@ void dlss_rr_replace_through_primary_dielectric(vec3 p_origin, vec3 p_dir) {
 	vec3 apparent_pos = p_origin + p_dir * walk.scene_length;
 	vec3 motion = vec3(unpackHalf2x16(payload.packed_rt[0]), unpackHalf2x16(payload.packed_rt[1]).x);
 	float roughness = unpackHalf2x16(payload.packed_rt[1]).y;
-	vec2 mv = rt_motion_vector(apparent_pos, apparent_pos + walk.image_xform * motion);
+	vec2 mv = dlss_rr_get_motion_vector_through_crossings(walk.crossings, apparent_pos, walk.hit_pos, motion, walk.image_xform * motion);
 	imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
 	dlss_rr_write_specular_motion_vector(mv);
 	imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
@@ -317,12 +494,13 @@ void trace_raster_overlay_depth() {
 // straight through the primary glass or water, which saves the walk above. The hit wrote its
 // albedos, normal and roughness, and left its world motion in the velocity (xy) and depth (z)
 // images. Those become the motion vector and depth of its apparent position: as far along the
-// camera ray as the path looks (dlss_rr_apparent_length).
-void dlss_rr_finish_transmitted_guides(vec3 p_origin, vec3 p_dir, float p_scene_length) {
+// camera ray as the path looks (dlss_rr_apparent_length), the motion vector reprojected through
+// p_crossings where they're known.
+void dlss_rr_finish_transmitted_guides(vec3 p_origin, vec3 p_dir, float p_scene_length, DlssRrCrossings p_crossings, vec3 p_hit_pos) {
 	ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
 	vec3 motion = vec3(imageLoad(rt_velocity_image, pixel).xy, imageLoad(rt_depth_image, pixel).x);
 	vec3 apparent_pos = p_origin + p_dir * p_scene_length;
-	vec2 mv = rt_motion_vector(apparent_pos, apparent_pos + motion);
+	vec2 mv = dlss_rr_get_motion_vector_through_crossings(p_crossings, apparent_pos, p_hit_pos, motion, motion);
 	imageStore(rt_velocity_image, pixel, vec4(mv, 0.0, 0.0));
 	dlss_rr_write_specular_motion_vector(mv);
 	imageStore(rt_depth_image, pixel, vec4(rt_ndc_depth(apparent_pos)));
@@ -418,6 +596,8 @@ void main() {
 		// a trace is saved and restored around it, and resuming the walk from here instead of
 		// the camera (two more vec3s) cost more than the rays it saved.
 		float transmit_scene_length = 0.0;
+		// The planes it went through, for the motion vector: nine more floats alive across each trace.
+		DlssRrCrossings transmit_crossings = dlss_rr_no_crossings();
 #endif
 
 		[[dont_unroll]] for (uint bounce = 0u; bounce <= max_bounces; bounce++) {
@@ -452,7 +632,8 @@ void main() {
 				transmit_through = true;
 			} else if (transmit_through && !transmit_flag_left) {
 				// The hit wrote its guides and cleared the flag.
-				dlss_rr_finish_transmitted_guides(origin.xyz, direction.xyz, transmit_scene_length + dlss_rr_apparent_length(ps.hit_t, medium_entry));
+				dlss_rr_finish_transmitted_guides(origin.xyz, direction.xyz, transmit_scene_length + dlss_rr_apparent_length(ps.hit_t, medium_entry),
+						transmit_crossings, ray_origin + ray_dir * ps.hit_t);
 				transmit_pending = false;
 				transmit_through = false;
 			}
@@ -469,6 +650,9 @@ void main() {
 					// or the bounce limit leaves the guides to the walk.
 					transmit_scene_length += dlss_rr_apparent_length(ps.hit_t, medium_entry);
 					bool went_through = dot(ray_dir, ps.offset_normal) > 0.0;
+					if (went_through) {
+						dlss_rr_add_crossing(transmit_crossings, ray_origin + ray_dir * ps.hit_t, ps.offset_normal, medium_entry, ps.medium);
+					}
 					transmit_through = went_through && !is_path_terminated(ps.packed_bounces_flags);
 				}
 			}
@@ -551,8 +735,11 @@ void main() {
 					bool layer_took_transmitted_guides = (flags_entry & DLSS_RR_TRANSMIT_PENDING_FLAG) != 0u &&
 							(ps.packed_bounces_flags & DLSS_RR_TRANSMIT_PENDING_FLAG) == 0u;
 					if (layer_took_transmitted_guides) {
+						// The crossings already hold this segment's far end, past the layer, so it keeps the apparent point.
+						DlssRrCrossings layer_crossings = dlss_rr_no_crossings();
+						layer_crossings.is_unusable = true;
 						dlss_rr_finish_transmitted_guides(origin.xyz, direction.xyz,
-								transmit_length_at_segment_start + dlss_rr_apparent_length(ps.hit_t, medium_entry));
+								transmit_length_at_segment_start + dlss_rr_apparent_length(ps.hit_t, medium_entry), layer_crossings, vec3(0.0));
 						transmit_pending = false;
 					}
 #endif
